@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
+use clap::Parser;
+
 macro_rules! trace {
     ($($arg:tt)*) => {{
         use std::io::Write;
@@ -29,6 +31,18 @@ use serde::{Deserialize, Serialize};
 
 const TTL: Duration = Duration::from_secs(1);
 const BLKSIZE: u32 = 4096;
+
+#[derive(Parser)]
+#[command(name = "zerotrust-drive", about = "FUSE-based encrypted overlay filesystem")]
+struct Cli {
+    /// Directory for encrypted .age files (storage backend, auto-managed — do not modify directly)
+    #[arg(long, default_value = "target/.encrypted.disk")]
+    encrypted_dir: PathBuf,
+
+    /// FUSE mount point showing decrypted files
+    #[arg(long, default_value = "target/decrypted.disk")]
+    decrypted_dir: PathBuf,
+}
 
 // --- Encryption helpers ---
 // Derive a 256-bit key from passphrase using SHA-256 (fast, deterministic).
@@ -126,6 +140,7 @@ struct ZeroTrustFs {
     key: [u8; 32],
     state: Mutex<DiskIndex>,
     open_files: Mutex<HashMap<u64, Vec<u8>>>,
+    index_mtime: Mutex<Option<SystemTime>>,
 }
 
 impl ZeroTrustFs {
@@ -158,6 +173,7 @@ impl ZeroTrustFs {
         let zfs = Self {
             base_path, key,
             state: Mutex::new(state), open_files: Mutex::new(HashMap::new()),
+            index_mtime: Mutex::new(None),
         };
         zfs.persist_index(&json);
         zfs
@@ -165,8 +181,15 @@ impl ZeroTrustFs {
 
     /// Encrypt and write pre-serialized JSON to _index.age. No locks held.
     fn persist_index(&self, json: &[u8]) {
+        let index_path = self.base_path.join("_index.age");
         let encrypted = encrypt_bytes(&self.key, json).expect("failed to encrypt index");
-        fs::write(self.base_path.join("_index.age"), encrypted).expect("failed to write index");
+        fs::write(&index_path, encrypted).expect("failed to write index");
+        // Record mtime so we can detect external modifications
+        if let Ok(meta) = fs::metadata(&index_path) {
+            if let Ok(mtime) = meta.modified() {
+                *self.index_mtime.lock().unwrap() = Some(mtime);
+            }
+        }
     }
 
     fn allocate_disk_filename(state: &mut DiskIndex) -> String {
@@ -211,7 +234,21 @@ impl ZeroTrustFs {
     }
 
     /// Lock state, serialize, drop lock, encrypt+write. Safe to call without any locks held.
+    /// Detects external modifications to _index.age (e.g. by Google Drive sync) and warns.
     fn flush_state(&self) {
+        // Check for external modification of the index
+        let index_path = self.base_path.join("_index.age");
+        let our_mtime = *self.index_mtime.lock().unwrap();
+        if let (Some(ours), Ok(meta)) = (our_mtime, fs::metadata(&index_path)) {
+            if let Ok(disk_mtime) = meta.modified() {
+                if disk_mtime != ours {
+                    let msg = "zerotrust-drive: WARNING: _index.age was modified externally (e.g. by cloud sync) — overwriting with in-memory state";
+                    eprintln!("{msg}");
+                    trace!("{msg}");
+                }
+            }
+        }
+
         let json = {
             let state = self.state.lock().unwrap();
             serde_json::to_vec(&*state).expect("failed to serialize index")
@@ -692,16 +729,19 @@ impl Filesystem for ZeroTrustFs {
 }
 
 fn main() {
+    let cli = Cli::parse();
     let passphrase = std::env::var("ZEROTRUST_PASSPHRASE")
         .unwrap_or_else(|_| "zerotrust-demo-passphrase".to_string());
-    let base_path = PathBuf::from("target/disk");
-    let mountpoint = PathBuf::from("target/mnt");
+    let base_path = cli.encrypted_dir;
+    let mountpoint = cli.decrypted_dir;
 
     fs::create_dir_all(&base_path).unwrap();
     fs::create_dir_all(&mountpoint).unwrap();
 
     eprintln!("zerotrust-drive: mounting at {}", mountpoint.display());
     eprintln!("zerotrust-drive: encrypted storage at {}", base_path.display());
+    eprintln!("zerotrust-drive: NOTE: in-memory filesystem — all file content is held in RAM while open");
+    eprintln!("zerotrust-drive: not recommended for files larger than available memory");
     eprintln!("zerotrust-drive: press Ctrl+C to unmount");
 
     let mut config = Config::default();
@@ -1016,6 +1056,43 @@ mod tests {
             let content = ztfs.read_encrypted_file(&disk_filename);
             assert_eq!(content, b"persisted data!");
         }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn conflict_detection_on_external_index_modification() {
+        let dir = PathBuf::from("target/test-conflict");
+        let _ = fs::remove_dir_all(&dir);
+
+        let ztfs = ZeroTrustFs::new("conflict-pw", dir.clone());
+
+        // Initial flush — records mtime
+        ztfs.flush_state();
+        let mtime_before = *ztfs.index_mtime.lock().unwrap();
+        assert!(mtime_before.is_some());
+
+        // Simulate external modification (e.g. Google Drive sync overwrites _index.age)
+        std::thread::sleep(Duration::from_millis(100));
+        let index_path = dir.join("_index.age");
+        let external_data = b"externally modified data";
+        fs::write(&index_path, external_data).unwrap();
+
+        // Verify mtime changed on disk
+        let disk_mtime = fs::metadata(&index_path).unwrap().modified().unwrap();
+        assert_ne!(Some(disk_mtime), mtime_before, "disk mtime should differ after external write");
+
+        // flush_state should detect the conflict and still write (updating mtime)
+        ztfs.flush_state();
+        let mtime_after = *ztfs.index_mtime.lock().unwrap();
+        assert!(mtime_after.is_some());
+        assert_ne!(mtime_before, mtime_after, "mtime should be updated after flush");
+
+        // Verify the index is valid (our in-memory state was written, not the external garbage)
+        let ciphertext = fs::read(&index_path).unwrap();
+        let key = derive_key("conflict-pw");
+        let json = decrypt_bytes(&key, &ciphertext).expect("index should be decryptable");
+        let _index: DiskIndex = serde_json::from_slice(&json).expect("index should be valid JSON");
 
         let _ = fs::remove_dir_all(&dir);
     }

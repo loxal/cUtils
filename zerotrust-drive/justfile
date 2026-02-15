@@ -1,17 +1,20 @@
+encrypted_dir := "target/.encrypted.disk"
+decrypted_dir := "target/decrypted.disk"
+
 default: build
 
 build:
     cargo build
 
 mount: build
-    mkdir -p target/mnt
-    cargo run
+    mkdir -p {{decrypted_dir}}
+    cargo run -- --encrypted-dir {{encrypted_dir}} --decrypted-dir {{decrypted_dir}}
 
-unmount:
-    umount target/mnt || diskutil unmount target/mnt
+umount:
+    umount {{decrypted_dir}} || diskutil unmount {{decrypted_dir}}
 
 run: build
-    cargo run
+    cargo run -- --encrypted-dir {{encrypted_dir}} --decrypted-dir {{decrypted_dir}}
 
 test:
     cargo test
@@ -21,4 +24,4 @@ release:
 
 clean:
     cargo clean
-    rm -rf target/disk target/mnt
+    rm -rf {{encrypted_dir}} {{decrypted_dir}}
