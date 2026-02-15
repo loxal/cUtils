@@ -1,5 +1,10 @@
 # cUtils
-coreUtils-consoleUtils-cloudUtils-cyberUtils cryptUtils cyberUtils
+* coreUtils
+* consoleUtils
+* cloudUtils
+* cyberUtils
+* cryptUtils
+* cyberUtils
 
 ## zerotrust-drive
 
@@ -21,23 +26,39 @@ Unmount and remount to pick up external changes.
 
 ### Prerequisites
 
-Requires [macFUSE](https://macfuse.github.io/) to be installed.
+A FUSE implementation is required. Install the one for your OS:
+
+- **macOS** — [macFUSE](https://macfuse.github.io/)
+- **Linux** — `libfuse-dev` (Debian/Ubuntu: `sudo apt install libfuse-dev`, Fedora: `sudo dnf install fuse-devel`)
+- **Windows** — not supported (would require [WinFSP](https://winfsp.dev/) and a different FUSE crate)
+
+### Directory Layout
+
+    ~/Drive/.zerotrust.drive.encrypted/     encrypted storage — synced by Google Drive (ciphertext only)
+    ~/zerotrust.drive/                      FUSE mount point — local, NOT synced (you work here)
+
+The encrypted directory is auto-managed by zerotrust-drive. Do not modify its contents directly.
+Both paths are overridable via justfile variables or CLI flags `--encrypted-dir` / `--decrypted-dir`.
 
 ### Usage
 
-    just mount                                          # mount with default paths
-    just mount encrypted_dir=~/gdrive/zt                # point storage at Google Drive folder
-    ZEROTRUST_PASSPHRASE="my-secret" just mount         # mount with a custom passphrase
-    just umount                                         # unmount the filesystem
+    just mount                                          # mount (warns if using default passphrase)
+    just populate                                       # create test files on the mounted filesystem
+    just umount                                         # unmount (decrypted dir becomes empty)
+    just mount                                          # remount — files reappear from encrypted storage
     just test                                           # run unit tests
     just release                                        # build optimized release binary
     just clean                                          # remove build artifacts and encrypted storage
 
-Default paths: `target/.encrypted.disk` (storage) and `target/decrypted.disk` (mount).
-Both are overridable via justfile variables or CLI flags `--encrypted-dir` / `--decrypted-dir`.
+### Passphrase
 
-The encrypted storage directory (`target/.encrypted.disk`) is auto-managed by zerotrust-drive.
-Do not modify or touch its contents directly.
+Set the encryption passphrase via env var or CLI flag. If neither is set, a default
+demo passphrase is used and a warning is shown at mount.
+
+    ZEROTRUST_PASSPHRASE="my-secret" just mount         # via env var (recommended)
+    cargo run -- --passphrase "my-secret"                # via CLI flag
+
+The env var takes precedence if both are provided.
 
 ### Encryption
 
