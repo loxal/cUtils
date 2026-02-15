@@ -1,0 +1,24 @@
+default: build
+
+build:
+    cargo build
+
+mount: build
+    mkdir -p target/mnt
+    cargo run
+
+unmount:
+    umount target/mnt || diskutil unmount target/mnt
+
+run: build
+    cargo run
+
+test:
+    cargo test
+
+release:
+    cargo build --release
+
+clean:
+    cargo clean
+    rm -rf target/disk target/mnt
