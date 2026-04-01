@@ -1,0 +1,8 @@
+generate-audio prompt-file='~/my/src/loxal/lox/al/prompts/music.md' sample-count='1':
+    cargo run --release -- --prompt-file {{prompt-file}} --sample-count {{sample-count}}
+
+google-auth project='instant-droplet-485818-i0':
+    gcloud auth login --quiet
+    gcloud auth application-default login --quiet
+    gcloud auth application-default set-quota-project {{project}}
+    gcloud services enable aiplatform.googleapis.com --project={{project}}

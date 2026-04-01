@@ -1,0 +1,2 @@
+transcribe *args="--lang de --hugging-face-api-key $HUGGING_FACE_API_KEY --audio-folder ~/i.drive/my/archive/Maxim/inbox":
+    cargo run --release -- {{args}}

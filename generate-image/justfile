@@ -1,0 +1,8 @@
+generate-image prompt-file='~/my/src/loxal/lox/al/prompts/avatar.md' number-of-images='4' aspect-ratio='1:1' model='imagen-4.0-ultra-generate-001' no-watermark='false':
+    cargo run --release -- --prompt-file {{prompt-file}} --number-of-images {{number-of-images}} --aspect-ratio {{aspect-ratio}} --model {{model}} {{ if no-watermark == "true" { "--no-watermark" } else { "" } }}
+
+google-auth project='instant-droplet-485818-i0':
+    gcloud auth login --quiet
+    gcloud auth application-default login --quiet
+    gcloud auth application-default set-quota-project {{project}}
+    gcloud services enable aiplatform.googleapis.com --project={{project}}

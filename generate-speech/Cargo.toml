@@ -1,0 +1,16 @@
+[package]
+name = "generate-speech"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+gcp_auth = "0.12"
+pulldown-cmark = "0.12"
+regex = "1"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,9 @@
+# Alternative voice: de-DE-Neural2-B (full SSML support)
+generate-speech lang='de' override-voice='' strip-pitch='false' strip-emphasis='false' mp3='false':
+    cargo run --release -- --lang {{lang}} {{ if override-voice != "" { "--override-voice " + override-voice } else { "" } }} {{ if strip-pitch == "true" { "--strip-pitch" } else { "" } }} {{ if strip-emphasis == "true" { "--strip-emphasis" } else { "" } }} {{ if mp3 == "true" { "--mp3" } else { "" } }}
+
+google-auth project='instant-droplet-485818-i0':
+    gcloud auth login --quiet
+    gcloud auth application-default login --quiet
+    gcloud auth application-default set-quota-project {{project}}
+    gcloud services enable texttospeech.googleapis.com --project={{project}}
