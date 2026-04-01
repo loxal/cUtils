@@ -189,7 +189,7 @@ async fn main() {
     println!("Generated {} video(s).", videos.len());
     for (i, video) in videos.iter().enumerate() {
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-        let filename = video_dir.join(format!("video-series-{theme}-{timestamp}.mp4"));
+        let filename = video_dir.join(format!("video-series-{theme}-{timestamp}-{i}.mp4"));
 
         if let Some(bytes) = &video.bytes {
             fs::write(&filename, bytes).unwrap_or_else(|e| {

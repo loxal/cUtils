@@ -88,9 +88,9 @@ async fn main() {
     }
 
     println!("Generated {} audio clip(s).", clips.len());
-    for clip in &clips {
+    for (i, clip) in clips.iter().enumerate() {
         let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-        let filename = audio_dir.join(format!("audio-series-{theme}-{timestamp}.wav"));
+        let filename = audio_dir.join(format!("audio-series-{theme}-{timestamp}-{i}.wav"));
         fs::write(&filename, clip).unwrap_or_else(|e| {
             eprintln!("Failed to write {}: {e}", filename.display());
             process::exit(1);

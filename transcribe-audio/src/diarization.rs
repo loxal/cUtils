@@ -15,17 +15,37 @@ struct ApiSegment {
     end: f64,
 }
 
+fn mime_type_for_audio(path: &str) -> &'static str {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("wav") => "audio/wav",
+        Some("mp3" | "mpga" | "mpeg") => "audio/mpeg",
+        Some("m4a" | "aac") => "audio/mp4",
+        Some("ogg" | "opus") => "audio/ogg",
+        Some("flac") => "audio/flac",
+        Some("webm") => "audio/webm",
+        Some("wma") => "audio/x-ms-wma",
+        Some("mp4") => "audio/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
 pub async fn diarize(
     audio_path: &str,
     hf_token: &str,
 ) -> Result<Vec<SpeakerSegment>, Box<dyn std::error::Error>> {
     let audio_bytes = std::fs::read(audio_path)?;
+    let content_type = mime_type_for_audio(audio_path);
 
     let client = Client::new();
     let response = client
         .post("https://api-inference.huggingface.co/models/pyannote/speaker-diarization-3.1")
         .header("Authorization", format!("Bearer {hf_token}"))
-        .header("Content-Type", "audio/wav")
+        .header("Content-Type", content_type)
         .body(audio_bytes)
         .send()
         .await?;

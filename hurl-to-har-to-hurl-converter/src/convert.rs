@@ -219,12 +219,21 @@ pub fn hurl_to_har(hurl_path: &Path, out_dir: &Path) -> Result<std::path::PathBu
             url.clone()
         } else {
             let sep = if url.contains('?') { '&' } else { '?' };
-            use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+            use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+            // Encode only characters that break query-string parsing while
+            // preserving HURL template placeholders like {{variable}}.
+            const QS_VALUE: &AsciiSet = &CONTROLS
+                .add(b' ')
+                .add(b'%')
+                .add(b'#')
+                .add(b'&')
+                .add(b'+')
+                .add(b'=');
             let qs = query_params
                 .iter()
                 .map(|q| {
-                    let name = utf8_percent_encode(&q.name, NON_ALPHANUMERIC);
-                    let value = utf8_percent_encode(&q.value, NON_ALPHANUMERIC);
+                    let name = utf8_percent_encode(&q.name, QS_VALUE);
+                    let value = utf8_percent_encode(&q.value, QS_VALUE);
                     format!("{name}={value}")
                 })
                 .collect::<Vec<_>>()
@@ -412,19 +421,13 @@ fn extract_hurl_body_text(body: &hurl_core::ast::Body) -> Option<String> {
         Bytes::MultilineString(m) => Some(m.value().to_string()),
         Bytes::OnelineString(t) => Some(template_to_string(t)),
         Bytes::Base64(b) => String::from_utf8(b.value.clone()).ok().or_else(|| {
-            use std::fmt::Write;
-            let mut encoded = String::with_capacity(b.value.len() * 4 / 3 + 4);
-            encoded.push_str("base64,");
-            for byte in &b.value {
-                write!(encoded, "{byte:02x}").ok();
-            }
-            Some(encoded)
+            use base64::Engine;
+            Some(base64::engine::general_purpose::STANDARD.encode(&b.value))
         }),
         Bytes::Hex(h) => String::from_utf8(h.value.clone()).ok().or_else(|| {
-            let mut encoded = String::with_capacity(h.value.len() * 2 + 4);
-            encoded.push_str("hex,");
+            use std::fmt::Write;
+            let mut encoded = String::with_capacity(h.value.len() * 2);
             for byte in &h.value {
-                use std::fmt::Write;
                 write!(encoded, "{byte:02x}").ok();
             }
             Some(encoded)

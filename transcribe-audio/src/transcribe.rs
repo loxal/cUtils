@@ -2,6 +2,17 @@ use std::path::Path;
 use std::process::Command;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+/// Whisper language IDs in order (matches whisper.cpp/whisper_lang_str).
+const WHISPER_LANGS: &[&str] = &[
+    "en", "zh", "de", "fr", "es", "ru", "ko", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv",
+    "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no",
+    "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr",
+    "az", "sl", "kn", "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
+    "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu",
+    "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl",
+    "mg", "as", "tt", "haw", "ln", "ha", "ba", "jw", "su", "yue",
+];
+
 pub struct Segment {
     pub start: f64,
     pub end: f64,
@@ -101,7 +112,17 @@ pub fn transcribe(
         }
     }
 
-    let detected_lang = language.unwrap_or("en").to_string();
+    let detected_lang = if let Some(lang) = language {
+        lang.to_string()
+    } else {
+        state
+            .full_lang_id_from_state()
+            .ok()
+            .and_then(|id| WHISPER_LANGS.get(id as usize))
+            .copied()
+            .unwrap_or("en")
+            .to_string()
+    };
 
     Ok(TranscriptionResult {
         language: detected_lang,
