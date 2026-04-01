@@ -138,11 +138,18 @@ async fn poll_operation(
     location: &str,
     operation_name: &str,
 ) -> Result<Vec<GeneratedVideo>, Box<dyn std::error::Error>> {
-    // Publisher model operations use UUID IDs and must be polled at the full
-    // operation name under v1beta1 (not the v1 numeric-ID operations endpoint).
+    // Publisher model LROs use UUID IDs in a separate namespace.
+    // They must be polled via the model's fetchPredictOperation endpoint,
+    // not the standard operations.get resource.
+    let model_resource = operation_name
+        .rsplit_once("/operations/")
+        .map(|(base, _)| base)
+        .unwrap_or(operation_name);
     let url = format!(
-        "https://{location}-aiplatform.googleapis.com/v1beta1/{operation_name}"
+        "https://{location}-aiplatform.googleapis.com/v1beta1/{model_resource}:fetchPredictOperation"
     );
+    let poll_body = serde_json::json!({"operationName": operation_name});
+
     let client = Client::new();
     let timeout = Duration::from_secs(600);
     let start = std::time::Instant::now();
@@ -155,7 +162,12 @@ async fn poll_operation(
         tokio::time::sleep(Duration::from_secs(10)).await;
 
         let token = get_token().await?;
-        let response = client.get(&url).bearer_auth(&token).send().await?;
+        let response = client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&poll_body)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
