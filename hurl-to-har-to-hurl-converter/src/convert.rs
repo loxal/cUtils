@@ -66,8 +66,12 @@ pub fn har_to_hurl(har_path: &Path, out_dir: &Path) -> Result<std::path::PathBuf
             hurl_output.push_str(&format!("{}: {}\n", h.name, h.value));
         }
 
-        // Request cookies
-        if !req.cookies.is_empty() {
+        // Request cookies (skip if a Cookie header already exists)
+        let has_cookie_header = req
+            .headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("cookie"));
+        if !req.cookies.is_empty() && !has_cookie_header {
             let cookie_str: String = req
                 .cookies
                 .iter()
@@ -131,7 +135,11 @@ fn har_v1_3_to_hurl(
             hurl_output.push_str(&format!("{}: {}\n", h.name, h.value));
         }
 
-        if !req.cookies.is_empty() {
+        let has_cookie_header = req
+            .headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("cookie"));
+        if !req.cookies.is_empty() && !has_cookie_header {
             let cookie_str: String = req
                 .cookies
                 .iter()
@@ -211,9 +219,14 @@ pub fn hurl_to_har(hurl_path: &Path, out_dir: &Path) -> Result<std::path::PathBu
             url.clone()
         } else {
             let sep = if url.contains('?') { '&' } else { '?' };
+            use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
             let qs = query_params
                 .iter()
-                .map(|q| format!("{}={}", q.name, q.value))
+                .map(|q| {
+                    let name = utf8_percent_encode(&q.name, NON_ALPHANUMERIC);
+                    let value = utf8_percent_encode(&q.value, NON_ALPHANUMERIC);
+                    format!("{name}={value}")
+                })
                 .collect::<Vec<_>>()
                 .join("&");
             format!("{url}{sep}{qs}")
@@ -398,8 +411,24 @@ fn extract_hurl_body_text(body: &hurl_core::ast::Body) -> Option<String> {
         Bytes::Xml(s) => Some(s.clone()),
         Bytes::MultilineString(m) => Some(m.value().to_string()),
         Bytes::OnelineString(t) => Some(template_to_string(t)),
-        Bytes::Base64(b) => String::from_utf8(b.value.clone()).ok(),
-        Bytes::Hex(h) => String::from_utf8(h.value.clone()).ok(),
+        Bytes::Base64(b) => String::from_utf8(b.value.clone()).ok().or_else(|| {
+            use std::fmt::Write;
+            let mut encoded = String::with_capacity(b.value.len() * 4 / 3 + 4);
+            encoded.push_str("base64,");
+            for byte in &b.value {
+                write!(encoded, "{byte:02x}").ok();
+            }
+            Some(encoded)
+        }),
+        Bytes::Hex(h) => String::from_utf8(h.value.clone()).ok().or_else(|| {
+            let mut encoded = String::with_capacity(h.value.len() * 2 + 4);
+            encoded.push_str("hex,");
+            for byte in &h.value {
+                use std::fmt::Write;
+                write!(encoded, "{byte:02x}").ok();
+            }
+            Some(encoded)
+        }),
         Bytes::File(_) => None, // Cannot inline file content without reading it
     }
 }

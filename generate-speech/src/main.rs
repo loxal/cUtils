@@ -229,15 +229,13 @@ async fn main() {
         process::exit(1);
     }
 
-    let status = Command::new("gcloud")
+    let rm_status = Command::new("gcloud")
         .args(["storage", "rm", &output_gcs_uri])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .expect("Failed to run gcloud");
-    if !status.success() {
-        eprintln!("gcloud storage rm failed");
-        process::exit(1);
+        .status();
+    if rm_status.is_err() || !rm_status.unwrap().success() {
+        eprintln!("Warning: failed to clean up {output_gcs_uri}");
     }
 
     if let Some(ref author) = args.author {
