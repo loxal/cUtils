@@ -1,0 +1,87 @@
+# Copyright 2026 Alexander Orlov <alexander.orlov@loxal.net>
+#
+# bitwarden-dedup — task runner
+#
+# Two binaries:
+#   * bitwarden-dedup   — deduplicate a real export into an import-ready file
+#   * bitwarden-redact  — produce a committable redacted replica of a real export
+#
+# Default recipe (running `just`) prints the list.
+
+default:
+    @just --list
+
+# Build both binaries in release mode.
+build:
+    cargo build --release
+
+# Deduplicate a Bitwarden vault export. Without arguments, auto-
+# discovers the latest `bitwarden_export_<timestamp>.json` in vault/
+# by lexical sort on the filename (zero-padded YYYYMMDDHHMMSS
+# timestamps sort chronologically). Pass INPUT to override and point
+# at a specific file. OUTPUT / AUDIT let you override the default
+# sibling paths (point at /tmp/ or vault/, never at examples/).
+dedup input='' output='' audit='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    input="{{input}}"
+    if [[ -z "$input" ]]; then
+        if [[ ! -d vault ]]; then
+            echo "error: no INPUT given and vault/ directory does not exist" >&2
+            echo "hint: mkdir -p vault && mv ~/Downloads/bitwarden_export_*.json vault/" >&2
+            exit 1
+        fi
+        input=$({ find vault -maxdepth 1 -type f \
+            -name 'bitwarden_export_*.json' \
+            ! -name '*.dedup.json' \
+            ! -name '*.dedup.audit.json' \
+            2>/dev/null || true; } | sort | tail -1)
+        if [[ -z "$input" ]]; then
+            echo "error: no bitwarden_export_*.json file in vault/" >&2
+            echo "hint: mv ~/Downloads/bitwarden_export_*.json vault/" >&2
+            exit 1
+        fi
+        echo "using latest export: $input" >&2
+    fi
+    cargo run --release --bin bitwarden-dedup -- --input "$input" {{ if output != "" { "--output " + output } else { "" } }} {{ if audit != "" { "--audit " + audit } else { "" } }}
+
+# Run the dedup tool against the committed synthetic example fixture.
+# Useful for smoke-testing a build without needing a real vault export.
+example:
+    ./target/release/bitwarden-dedup --input examples/bitwarden_export_20260411172632.json --output /tmp/example.dedup.json --audit /tmp/example.dedup.audit.json
+
+# Produce a local redacted replica of a real vault export. The output is
+# safe to share with a reviewer: passwords, TOTP seeds, FIDO2 credentials,
+# usernames, URIs, notes, custom field values, item ids, folder ids,
+# organization metadata, collection ids, and all timestamps are
+# synthesized or nulled. Still DO NOT commit this output — the redactor
+# output is gitignored and MUST be written to `/tmp/` or `vault/`, never
+# to `examples/`. Example: `just redact vault/bitwarden_export.json /tmp/redacted.json`
+redact input output:
+    cargo run --release --bin bitwarden-redact -- --input {{input}} --output {{output}}
+
+# Regenerate the committed example fixture at examples/example_export.json.
+# The fixture is constructed by tests/fixture.rs::build_curated_fixture()
+# and contains NO data originating from any real vault.
+regenerate-example:
+    cargo test --test fixture regenerate_example_fixture -- --ignored --nocapture
+
+# Run the full test suite (lib + both binaries + integration + leak-guard).
+test:
+    cargo test
+
+# Run only the leak-guard on the committed example fixture.
+leak-guard:
+    cargo test --test fixture example_fixture_no_leaked_strings
+
+# Format and lint.
+check:
+    cargo fmt --check
+    cargo clippy --all-targets --all-features -- -D warnings
+
+fmt:
+    cargo fmt
+
+# Wipe build artifacts.
+clean:
+    cargo clean

@@ -1,0 +1,27 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+
+# Secrets — NEVER commit Bitwarden vault exports or derived files.
+# These files contain plaintext passwords, TOTP seeds, and passkey data.
+bitwarden_export_*.json
+*.dedup.json
+*.dedup.audit.json
+# Local redactor output (bitwarden-redact). The redacted replica still
+# contains vault-shape metadata (counts, per-item URI counts, dates) and
+# is intended for local reviewer sharing, not commit.
+*.redacted.json
+*-redacted.json
+redacted-*.json
+vault/
+
+# Exception: the committed synthetic fixture lives under examples/ and
+# uses the `bitwarden_export_<timestamp>.json` filename format. It is
+# produced exclusively by tests/fixture.rs::build_curated_fixture() and
+# every string it contains is shape-checked by the leak-guard test. The
+# `examples_directory_contains_only_fixture` test enforces that this
+# is the ONLY file under examples/, so the exception can never be used
+# to smuggle in a real export.
+!examples/bitwarden_export_*.json

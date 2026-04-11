@@ -28,3 +28,7 @@ Rust CLI for audio-to-SSML transcription using whisper.cpp. Recursively processe
 ## [hurl-to-har-to-hurl-converter](hurl-to-har-to-hurl-converter/)
 
 Bidirectional converter between HURL and HAR formats.
+
+## [bitwarden-dedup](bitwarden-dedup/)
+
+Rust CLI that deduplicates a Bitwarden JSON vault export into an import-ready file. Uses a strict dedup key (name + username + password + TOTP + FIDO2 credentials + notes + custom fields + favorite) and merges URIs from dropped items into the kept item so no login URL is ever lost. TOTP secrets and passkey data are preserved verbatim.

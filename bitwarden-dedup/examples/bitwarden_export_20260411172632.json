@@ -1,0 +1,630 @@
+{
+  "encrypted": false,
+  "folders": [
+    {
+      "id": "00000000-0000-0000-0001-000000000001",
+      "name": "Folder 01"
+    }
+  ],
+  "items": [
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000001",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-01",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service01.example.test"
+          }
+        ],
+        "username": "user01@example.test"
+      },
+      "name": "Lonely Login",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000002",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-02",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service02.example.test"
+          }
+        ],
+        "username": "user02@example.test"
+      },
+      "name": "Exact Duplicate",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2025-06-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000003",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-02",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service02.example.test"
+          }
+        ],
+        "username": "user02@example.test"
+      },
+      "name": "Exact Duplicate",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-06-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000004",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-03",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service03.example.test/primary"
+          },
+          {
+            "match": null,
+            "uri": "https://service03.example.test/secondary"
+          }
+        ],
+        "username": "user03@example.test"
+      },
+      "name": "URI Divergent",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2025-06-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000005",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-03",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service03.example.test/primary"
+          }
+        ],
+        "username": "user03@example.test"
+      },
+      "name": "URI Divergent",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-06-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000006",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-04",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service04.example.test"
+          },
+          {
+            "match": null,
+            "uri": "androidapp://com.example.service04"
+          }
+        ],
+        "username": "user04@example.test"
+      },
+      "name": "Mobile App",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2025-06-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000007",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-04",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service04.example.test"
+          }
+        ],
+        "username": "user04@example.test"
+      },
+      "name": "Mobile App",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-06-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000008",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-05",
+        "totp": null,
+        "uris": [
+          {
+            "match": 3,
+            "uri": "https://service05.example.test"
+          }
+        ],
+        "username": "user05@example.test"
+      },
+      "name": "Match Mode Divergent",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2025-06-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000009",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-05",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service05.example.test"
+          }
+        ],
+        "username": "user05@example.test"
+      },
+      "name": "Match Mode Divergent",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-06-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-00000000000a",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-06",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service06.example.test"
+          }
+        ],
+        "username": "user06@example.test"
+      },
+      "name": "Triple Copy",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2024-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-00000000000b",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-06",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service06.example.test"
+          }
+        ],
+        "username": "user06@example.test"
+      },
+      "name": "Triple Copy",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2025-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-00000000000c",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-06",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service06.example.test"
+          }
+        ],
+        "username": "user06@example.test"
+      },
+      "name": "Triple Copy",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-00000000000d",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-07a",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service07.example.test"
+          }
+        ],
+        "username": "user07@example.test"
+      },
+      "name": "Two Accounts Same Site",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-00000000000e",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-07b",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service07.example.test"
+          }
+        ],
+        "username": "user07@example.test"
+      },
+      "name": "Two Accounts Same Site",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-00000000000f",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-08",
+        "totp": "redacted-totp-seed-08",
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service08.example.test"
+          }
+        ],
+        "username": "user08@example.test"
+      },
+      "name": "With TOTP",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000010",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-09",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service09.example.test"
+          }
+        ],
+        "username": "user09@example.test"
+      },
+      "name": "Reprompt Protected",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 1,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000011",
+      "login": {
+        "fido2Credentials": [],
+        "password": "",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service10.example.test"
+          }
+        ],
+        "username": "user10@example.test"
+      },
+      "name": "No Password Set",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000012",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-11",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service11.example.test"
+          }
+        ],
+        "username": "user11@example.test"
+      },
+      "name": "Already Tagged [duplicate]",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": "2026-02-01T00:00:00Z",
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000013",
+      "login": {
+        "fido2Credentials": [],
+        "password": "redacted-password-12",
+        "totp": null,
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://service12.example.test"
+          }
+        ],
+        "username": "user12@example.test"
+      },
+      "name": "Trashed Item",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 1
+    },
+    {
+      "card": {
+        "brand": null,
+        "cardholderName": "REDACTED",
+        "code": null,
+        "expMonth": null,
+        "expYear": null,
+        "number": null
+      },
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000014",
+      "name": "Example Payment Card",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 3
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000015",
+      "identity": {
+        "address1": null,
+        "address2": null,
+        "address3": null,
+        "city": null,
+        "company": null,
+        "country": null,
+        "email": null,
+        "firstName": "REDACTED",
+        "lastName": "REDACTED",
+        "licenseNumber": null,
+        "middleName": null,
+        "passportNumber": null,
+        "phone": null,
+        "postalCode": null,
+        "ssn": null,
+        "state": null,
+        "title": null,
+        "username": null
+      },
+      "name": "Example Identity",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "type": 4
+    },
+    {
+      "collectionIds": null,
+      "creationDate": "2025-01-01T00:00:00Z",
+      "deletedDate": null,
+      "favorite": false,
+      "fields": null,
+      "folderId": "00000000-0000-0000-0001-000000000001",
+      "id": "00000000-0000-0000-0000-000000000016",
+      "name": "Example Secure Note",
+      "notes": null,
+      "organizationId": null,
+      "passwordHistory": null,
+      "reprompt": 0,
+      "revisionDate": "2026-01-01T00:00:00Z",
+      "secureNote": {
+        "type": 0
+      },
+      "type": 2
+    }
+  ]
+}

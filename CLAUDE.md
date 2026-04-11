@@ -9,6 +9,7 @@ Collection of Rust CLI utilities for cloud AI media generation and format conver
 | Directory | Purpose |
 |-----------|---------|
 | `hurl-to-har-to-hurl-converter/` | Convert between HURL and HAR file formats |
+| `bitwarden-dedup/` | Deduplicate a Bitwarden JSON export (strict match, URI merge, TOTP/FIDO2 preserved) |
 | `generate-speech/` | Google Cloud TTS long-form audio synthesis (SSML/Markdown → M4A/MP3) |
 | `generate-image/` | Google Cloud Imagen via Vertex AI (prompt → PNG) |
 | `generate-audio/` | Google Cloud Lyria music generation (prompt → WAV) |
