@@ -52,7 +52,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bitwarden_dedup::{dedup_key, skip_from_dedup};
@@ -72,6 +72,17 @@ struct Cli {
     /// Output path for the redacted replica.
     #[arg(short, long)]
     output: PathBuf,
+
+    /// Allow writing the output to a path inside a git repo even when
+    /// the filename does not match a gitignored pattern. WITHOUT this
+    /// flag, bitwarden-redact refuses to write inside a git repo unless
+    /// the filename ends in `.redacted.json` or sits under a `vault/`
+    /// directory, because the redacted replica still reveals vault-shape
+    /// metadata (type/reprompt/favorite counts, URI counts, match modes,
+    /// custom field counts) and must never be committed. `--force` prints
+    /// a warning and proceeds.
+    #[arg(long)]
+    force: bool,
 }
 
 fn main() -> ExitCode {
@@ -85,6 +96,13 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // Defense against accidental commit: if the output path resolves
+    // inside a git repo AND isn't one of the known-gitignored shapes,
+    // refuse. The redacted replica is safe to share with a reviewer but
+    // still reveals vault-shape metadata (item count, type distribution,
+    // URI counts, match modes, etc.), so it must never be committed.
+    check_output_repo_safety(&cli.output, cli.force)?;
+
     let text = fs::read_to_string(&cli.input)
         .map_err(|e| format!("reading {}: {e}", cli.input.display()))?;
     let data: Value = serde_json::from_str(&text)
@@ -174,6 +192,71 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     println!("Groups:  {total_groups} synthetic dedup groups");
     println!("Folders: {}", new_folders.len());
     Ok(())
+}
+
+/// Refuse to write redactor output inside a git repository unless the
+/// filename ends in `.redacted.json` OR the path sits under a `vault/`
+/// directory relative to the repo root. `--force` bypasses the check
+/// with a warning.
+///
+/// Outside any git repo (e.g. writing to `/tmp/…`), no check applies.
+fn check_output_repo_safety(output_path: &Path, force: bool) -> Result<(), String> {
+    let abs = std::path::absolute(output_path)
+        .map_err(|e| format!("resolving {}: {e}", output_path.display()))?;
+
+    // Start the git-root walk from the output's parent dir (or from
+    // the absolute path itself if there's no parent, which only happens
+    // for filesystem roots).
+    let start = abs.parent().unwrap_or(abs.as_path());
+    let Some(repo_root) = find_git_root(start) else {
+        // Not in a git repo — no repository to accidentally commit to.
+        return Ok(());
+    };
+
+    let filename = abs.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let ends_with_redacted = filename.ends_with(".redacted.json");
+
+    let relative = abs.strip_prefix(&repo_root).unwrap_or(abs.as_path());
+    let has_vault_component = relative
+        .components()
+        .any(|c| c.as_os_str().to_str() == Some("vault"));
+
+    if ends_with_redacted || has_vault_component {
+        return Ok(());
+    }
+
+    if force {
+        eprintln!(
+            "warning: --force bypassed redactor output safety\n  \
+             output path {} is inside git repo {} and is neither\n  \
+             `*.redacted.json` nor under a `vault/` directory",
+            output_path.display(),
+            repo_root.display()
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        "refusing to write redactor output inside git repo {}:\n  \
+         path: {}\n  \
+         redactor output reveals vault-shape metadata and must not be \
+         committed. Rename the output to end in `.redacted.json`, write \
+         it under `vault/`, write it to `/tmp/`, or pass --force to override.",
+        repo_root.display(),
+        output_path.display()
+    ))
+}
+
+/// Walk up from `start` looking for a directory entry named `.git`
+/// (either a dir, as in a normal clone, or a file, as in a worktree).
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start;
+    loop {
+        if current.join(".git").exists() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
 }
 
 /// Build a map from every real folder uuid to a synthetic one.
@@ -405,6 +488,107 @@ mod tests {
             Some(&"00000000-0000-0000-0001-000000000001".to_string())
         );
     }
+
+    // ---- Path-safety (finding 1) ----
+
+    use std::path::Path;
+
+    fn make_fake_repo(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bwd-path-safety-{}-{label}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn path_safety_rejects_arbitrary_filename_inside_repo() {
+        let repo = make_fake_repo("arbitrary");
+        let bad = repo.join("sample.json");
+        let result = super::check_output_repo_safety(&bad, false);
+        assert!(result.is_err(), "arbitrary filename must be rejected");
+        assert!(result.unwrap_err().contains("refusing to write"));
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn path_safety_allows_redacted_suffix_inside_repo() {
+        let repo = make_fake_repo("suffix");
+        let ok = repo.join("my-export.redacted.json");
+        assert!(super::check_output_repo_safety(&ok, false).is_ok());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn path_safety_allows_path_under_vault_inside_repo() {
+        let repo = make_fake_repo("vault");
+        let vault_dir = repo.join("vault");
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let ok = vault_dir.join("anything.json");
+        assert!(super::check_output_repo_safety(&ok, false).is_ok());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn path_safety_allows_nested_vault_subdir() {
+        let repo = make_fake_repo("nested-vault");
+        let nested = repo.join("subcrate").join("vault").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let ok = nested.join("anything.json");
+        assert!(super::check_output_repo_safety(&ok, false).is_ok());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn path_safety_force_bypasses_rejection() {
+        let repo = make_fake_repo("force");
+        let bad = repo.join("committable.json");
+        assert!(super::check_output_repo_safety(&bad, true).is_ok());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn path_safety_rejects_examples_path_even_with_redacted_naming() {
+        // Inside examples/ a filename with `.redacted.json` would
+        // *technically* be allowed by this check — but the crate's
+        // separate `examples_directory_contains_only_fixture` test in
+        // tests/fixture.rs will still fail. This test documents that
+        // the redactor path check doesn't duplicate that guarantee.
+        let repo = make_fake_repo("examples-passthrough");
+        let examples = repo.join("examples");
+        std::fs::create_dir_all(&examples).unwrap();
+        let ok = examples.join("foo.redacted.json");
+        assert!(super::check_output_repo_safety(&ok, false).is_ok());
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn path_safety_allows_paths_outside_any_repo() {
+        // /tmp isn't a git repo, so arbitrary filenames are allowed.
+        let tmp = std::env::temp_dir();
+        let ok = tmp.join("nowhere-near-a-repo.json");
+        assert!(super::check_output_repo_safety(&ok, false).is_ok());
+    }
+
+    #[test]
+    fn find_git_root_walks_up_to_the_right_dir() {
+        let repo = make_fake_repo("walk");
+        let deep = repo.join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        let root = super::find_git_root(&deep).expect("git root found");
+        assert_eq!(
+            std::fs::canonicalize(&root).unwrap(),
+            std::fs::canonicalize(&repo).unwrap()
+        );
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    fn _consume_path(_p: &Path) {} // suppress unused-import warning if Path isn't used
 }
 
 fn scrub_item(
@@ -430,17 +614,31 @@ fn scrub_item(
             .map(Value::String)
             .unwrap_or(Value::Null),
     );
+    // Coerce preserved fields through concrete Rust types rather than
+    // cloning whatever JSON value happens to be there. Defends against
+    // a weird export that has a string in `type`, an object in
+    // `reprompt`, etc. — we only emit the shapes Bitwarden's real
+    // schema defines.
     obj.insert(
         "type".into(),
-        item.get("type").cloned().unwrap_or(Value::Null),
+        item.get("type")
+            .and_then(Value::as_i64)
+            .map(|n| json!(n))
+            .unwrap_or(Value::Null),
     );
     obj.insert(
         "reprompt".into(),
-        item.get("reprompt").cloned().unwrap_or(json!(0)),
+        item.get("reprompt")
+            .and_then(Value::as_i64)
+            .map(|n| json!(n))
+            .unwrap_or(json!(0)),
     );
     obj.insert(
         "favorite".into(),
-        item.get("favorite").cloned().unwrap_or(json!(false)),
+        item.get("favorite")
+            .and_then(Value::as_bool)
+            .map(|b| json!(b))
+            .unwrap_or(json!(false)),
     );
     obj.insert("creationDate".into(), json!(synth_creation_date(rank)));
     obj.insert("revisionDate".into(), json!(synth_revision_date(rank)));
@@ -460,17 +658,22 @@ fn scrub_item(
     obj.insert("notes".into(), Value::Null);
 
     // Custom fields: preserve count, type, and linkedId; scrub name + value.
+    // Both `type` and `linkedId` are coerced through `as_i64` rather than
+    // cloned, so an export with a nonstandard JSON value in either field
+    // collapses to a safe default instead of being copied verbatim.
     let fields_val = match item.get("fields").and_then(Value::as_array) {
         Some(arr) if !arr.is_empty() => {
             let scrubbed: Vec<Value> = arr
                 .iter()
                 .enumerate()
                 .map(|(fi, f)| {
+                    let field_type = f.get("type").and_then(Value::as_i64).unwrap_or(0);
+                    let linked_id = f.get("linkedId").and_then(Value::as_i64);
                     json!({
                         "name": format!("field_{fi}"),
                         "value": "REDACTED",
-                        "type": f.get("type").cloned().unwrap_or(json!(0)),
-                        "linkedId": f.get("linkedId").cloned().unwrap_or(Value::Null),
+                        "type": field_type,
+                        "linkedId": linked_id,
                     })
                 })
                 .collect();
@@ -510,9 +713,13 @@ fn scrub_item(
                         .enumerate()
                         .map(|(i, u)| {
                             let orig = u.get("uri").and_then(Value::as_str);
+                            // Match mode is a Bitwarden numeric enum (0-5)
+                            // or null. Coerce through as_i64 to reject
+                            // any nonstandard shape.
+                            let match_mode = u.get("match").and_then(Value::as_i64);
                             json!({
                                 "uri": scrub_uri(orig, gid, i),
-                                "match": u.get("match").cloned().unwrap_or(Value::Null),
+                                "match": match_mode,
                             })
                         })
                         .collect();

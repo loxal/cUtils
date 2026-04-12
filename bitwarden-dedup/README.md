@@ -224,6 +224,24 @@ for LOCAL sharing with a reviewer, not for commit — it matches the
 just redact vault/bitwarden_export.json /tmp/redacted.json
 ```
 
+`bitwarden-redact` enforces this at the binary level: if the `--output`
+path resolves inside a git repository AND the filename does not end in
+`.redacted.json` AND the path is not under a `vault/` directory, the
+tool refuses to write and prints a clear error. The check guards
+against the common accidental commit where a user types `--output
+sample.json` from the crate root. Pass `--force` to override with a
+warning — but there is almost never a good reason to do so, because
+the redacted replica still reveals vault-shape metadata (item count,
+type distribution, URI counts, match modes, custom field counts) even
+though it strips every credential.
+
+All scrubbed custom-field and URI fields are coerced through concrete
+Rust types (`as_i64`, `as_bool`, `as_str`) rather than cloned verbatim,
+so a future Bitwarden export containing a nonstandard value in
+`type`, `reprompt`, `favorite`, `linkedId`, or a URI `match` mode will
+collapse to a safe default in the redactor output instead of being
+copied through.
+
 What the redactor strips (always replaced with a synthetic placeholder):
 
 - credential material: `login.password`, `login.totp`, `login.fido2Credentials`,

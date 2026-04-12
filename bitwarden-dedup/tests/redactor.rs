@@ -368,3 +368,256 @@ fn redactor_matches_output_item_count_to_source() {
 
     cleanup(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Adversarial shape check: walk every string in the redactor's output and
+// require each one to match a known synthetic shape the redactor is allowed
+// to emit. Catches the class of leak where a specific real string was
+// missed by the substring-scan allowlist above — this test doesn't care
+// WHAT the source strings were, only that the OUTPUT contains nothing that
+// looks structurally like a real email, hostname, password, UUID, or note.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn redactor_output_strings_all_match_synthetic_shapes() {
+    let dir = scratch_dir("shape-check");
+    let input = write_source(&dir);
+    let output = dir.join("redacted.json");
+    run_redactor(&input, &output);
+
+    let out: Value = serde_json::from_str(&std::fs::read_to_string(&output).unwrap()).unwrap();
+
+    let mut path_trail = String::new();
+    walk_strings(&out, &mut path_trail, &mut |s, p| {
+        assert!(
+            is_redactor_output_shape_safe(s),
+            "redactor output contains a string that doesn't match any \
+             synthetic shape\n  path:   {p}\n  string: {s:?}"
+        );
+    });
+
+    cleanup(&dir);
+}
+
+fn walk_strings(value: &Value, path: &mut String, visit: &mut impl FnMut(&str, &str)) {
+    match value {
+        Value::String(s) => visit(s, path),
+        Value::Array(arr) => {
+            for (i, v) in arr.iter().enumerate() {
+                let saved = path.len();
+                use std::fmt::Write;
+                let _ = write!(path, "[{i}]");
+                walk_strings(v, path, visit);
+                path.truncate(saved);
+            }
+        }
+        Value::Object(obj) => {
+            for (k, v) in obj {
+                let saved = path.len();
+                use std::fmt::Write;
+                let _ = write!(path, ".{k}");
+                walk_strings(v, path, visit);
+                path.truncate(saved);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_redactor_output_shape_safe(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+
+    // Literals the redactor emits in fixed positions (REDACTED for
+    // card/identity placeholder strings, folder labels, etc.).
+    const EXACT: &[&str] = &["REDACTED"];
+    if EXACT.contains(&s) {
+        return true;
+    }
+
+    is_example_service_name(s)
+        || is_example_user_4digits(s)
+        || is_redacted_password_4digits(s)
+        || is_redacted_totp_4digits(s)
+        || is_example_https_url(s)
+        || is_example_http_url(s)
+        || is_example_androidapp_url(s)
+        || is_example_opaque_bare(s)
+        || is_synthetic_uuid_item_or_folder(s)
+        || is_synthetic_folder_name(s)
+        || is_synthetic_rank_date(s)
+        || is_example_field_name(s)
+}
+
+// Custom-field labels emitted by scrub_item: `field_0`, `field_1`, …
+fn is_example_field_name(s: &str) -> bool {
+    s.strip_prefix("field_")
+        .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_example_service_name(s: &str) -> bool {
+    // "Example Service NNNN" — 4 digits, matches scrub_item()'s emitter.
+    s.strip_prefix("Example Service ")
+        .is_some_and(|rest| rest.len() == 4 && rest.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_example_user_4digits(s: &str) -> bool {
+    s.strip_prefix("user")
+        .and_then(|r| r.strip_suffix("@example.test"))
+        .is_some_and(|d| d.len() == 4 && d.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_redacted_password_4digits(s: &str) -> bool {
+    s.strip_prefix("redacted-password-")
+        .is_some_and(|d| d.len() == 4 && d.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_redacted_totp_4digits(s: &str) -> bool {
+    s.strip_prefix("redacted-totp-seed-")
+        .is_some_and(|d| d.len() == 4 && d.chars().all(|c| c.is_ascii_digit()))
+}
+
+// https://service\d{4}\.example\.test(/\d+)?
+fn is_example_https_url(s: &str) -> bool {
+    is_example_url_with_scheme(s, "https://")
+}
+
+fn is_example_http_url(s: &str) -> bool {
+    is_example_url_with_scheme(s, "http://")
+}
+
+fn is_example_url_with_scheme(s: &str, scheme: &str) -> bool {
+    let Some(rest) = s.strip_prefix(scheme) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix("service") else {
+        return false;
+    };
+    let Some((num, tail)) = rest.split_once('.') else {
+        return false;
+    };
+    if num.len() != 4 || !num.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    if tail == "example.test" {
+        return true;
+    }
+    if let Some(path) = tail.strip_prefix("example.test/") {
+        return !path.is_empty() && path.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+// androidapp://com.example.service\d{4}
+fn is_example_androidapp_url(s: &str) -> bool {
+    s.strip_prefix("androidapp://com.example.service")
+        .is_some_and(|d| d.len() == 4 && d.chars().all(|c| c.is_ascii_digit()))
+}
+
+// com.example.opaque.service\d{4}\.\d+
+fn is_example_opaque_bare(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("com.example.opaque.service") else {
+        return false;
+    };
+    let Some((num, idx)) = rest.split_once('.') else {
+        return false;
+    };
+    num.len() == 4
+        && num.chars().all(|c| c.is_ascii_digit())
+        && !idx.is_empty()
+        && idx.chars().all(|c| c.is_ascii_digit())
+}
+
+// 00000000-0000-0000-000[01]-[hex]{12}
+fn is_synthetic_uuid_item_or_folder(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    if !s.starts_with("00000000-0000-0000-0000-") && !s.starts_with("00000000-0000-0000-0001-")
+    {
+        return false;
+    }
+    if s.chars().filter(|&c| c == '-').count() != 4 {
+        return false;
+    }
+    s.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
+}
+
+// "Folder NN" — builder uses 2-digit zero-padded, but allow any run of digits.
+fn is_synthetic_folder_name(s: &str) -> bool {
+    s.strip_prefix("Folder ")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+}
+
+// Rank-based synthetic date: (2024|2025|2026)-12-31THH:MM:SSZ
+fn is_synthetic_rank_date(s: &str) -> bool {
+    if s.len() != 20 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return false;
+    }
+    let year = &s[..4];
+    if !matches!(year, "2024" | "2025" | "2026") {
+        return false;
+    }
+    if &s[5..10] != "12-31" {
+        return false;
+    }
+    s[11..13].chars().all(|c| c.is_ascii_digit())
+        && s[14..16].chars().all(|c| c.is_ascii_digit())
+        && s[17..19].chars().all(|c| c.is_ascii_digit())
+}
+
+// Smoke tests for the shape matchers themselves.
+#[cfg(test)]
+mod shape_unit_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_every_shape_the_redactor_emits() {
+        assert!(is_redactor_output_shape_safe("Example Service 0042"));
+        assert!(is_redactor_output_shape_safe("user0042@example.test"));
+        assert!(is_redactor_output_shape_safe("redacted-password-0042"));
+        assert!(is_redactor_output_shape_safe("redacted-totp-seed-0042"));
+        assert!(is_redactor_output_shape_safe("https://service0042.example.test"));
+        assert!(is_redactor_output_shape_safe("https://service0042.example.test/0"));
+        assert!(is_redactor_output_shape_safe("http://service0042.example.test/3"));
+        assert!(is_redactor_output_shape_safe("androidapp://com.example.service0042"));
+        assert!(is_redactor_output_shape_safe("com.example.opaque.service0042.0"));
+        assert!(is_redactor_output_shape_safe(
+            "00000000-0000-0000-0000-000000000017"
+        ));
+        assert!(is_redactor_output_shape_safe(
+            "00000000-0000-0000-0001-000000000000"
+        ));
+        assert!(is_redactor_output_shape_safe("Folder 01"));
+        assert!(is_redactor_output_shape_safe("2026-12-31T23:59:59Z"));
+        assert!(is_redactor_output_shape_safe("REDACTED"));
+        assert!(is_redactor_output_shape_safe("field_0"));
+        assert!(is_redactor_output_shape_safe("field_12"));
+    }
+
+    #[test]
+    fn rejects_real_looking_strings() {
+        assert!(!is_redactor_output_shape_safe("alice@example.com"));
+        assert!(!is_redactor_output_shape_safe("https://github.com"));
+        assert!(!is_redactor_output_shape_safe("https://service0042.example.test/github"));
+        assert!(!is_redactor_output_shape_safe("androidapp://com.github.android"));
+        assert!(!is_redactor_output_shape_safe("hunter2"));
+        assert!(!is_redactor_output_shape_safe("real note text"));
+        assert!(!is_redactor_output_shape_safe(
+            "aabbccdd-1111-2222-3333-444444444444"
+        ));
+        assert!(!is_redactor_output_shape_safe("Secret Folder"));
+        assert!(!is_redactor_output_shape_safe("2024-01-15T09:30:00Z")); // not 12-31
+    }
+}
