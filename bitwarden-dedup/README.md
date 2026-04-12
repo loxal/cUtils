@@ -4,6 +4,61 @@ Rust CLI that deduplicates a Bitwarden JSON vault export into an import-ready
 file. Strict matching, URI merging, and full preservation of TOTP secrets,
 FIDO2 credentials, notes, custom fields, and password history.
 
+> **100 % offline.** This tool runs entirely on your machine. It makes
+> **zero network connections** — no HTTP calls, no DNS lookups, no
+> telemetry, no update checks, no cloud APIs. Your vault data never
+> leaves your filesystem. The only I/O is reading the export JSON from
+> disk, processing it in memory, and writing the results back to disk.
+> This is verifiable: the crate depends only on `clap` (CLI parsing) and
+> `serde_json` (JSON parsing) — neither of which provides network
+> capability, and neither does any transitive dependency in `Cargo.lock`.
+
+## Quick start
+
+**Step 1 — Export your vault from Bitwarden.**
+
+In the Bitwarden web vault (`vault.bitwarden.com`) or the desktop app:
+**Tools → Export Vault → File format: JSON**. Enter your master
+password when prompted. This downloads a file named
+`bitwarden_export_YYYYMMDDHHMMSS.json` to your `~/Downloads/` folder.
+
+**Step 2 — Move the export into the `vault/` directory.**
+
+```bash
+cd bitwarden-dedup
+mkdir -p vault
+mv ~/Downloads/bitwarden_export_*.json vault/
+```
+
+The `vault/` directory is gitignored — nothing you put there will ever
+be committed. The export file contains **plaintext passwords, TOTP
+seeds, and passkey material**, so keep it here (or in `/tmp/`) and
+nowhere else inside the repository.
+
+**Step 3 — Run the dedup.**
+
+```bash
+just build
+just dedup
+```
+
+`just dedup` automatically picks the latest `bitwarden_export_*.json`
+file in `vault/` by sorting on the zero-padded timestamp infix (so
+if you have multiple exports, the newest one wins). The output and
+audit files are written next to the input:
+
+- `vault/bitwarden_export_<ts>.dedup.json` — the deduplicated,
+  import-ready file
+- `vault/bitwarden_export_<ts>.dedup.audit.json` — per-removal record
+  (ids, names, dates — no passwords or TOTP seeds)
+
+**Step 4 — Import the cleaned file back into Bitwarden.**
+
+See the [Import workflow](#import-workflow-bitwarden-web-vault) section
+below — the critical step is **Purge Vault before Import**, because
+Bitwarden's import always creates new items (it never deduplicates
+against the existing vault).
+
 ## Why strict matching
 
 A loose dedup key (just `name + username`) will mis-match unrelated accounts
@@ -40,25 +95,10 @@ Items that are **never** grouped (passed through unchanged):
 - items whose name already contains `[duplicate]`
 - deleted items (trash)
 
-## Usage
+## Advanced usage
 
-```bash
-# Put your export somewhere gitignored (the vault/ dir is excluded)
-mkdir -p vault
-mv ~/Downloads/bitwarden_export_*.json vault/
-
-# Run the dedup
-cargo run --release --bin bitwarden-dedup -- \
-  --input vault/bitwarden_export.json
-```
-
-By default, output and audit files are written next to the input:
-
-- `vault/bitwarden_export.dedup.json` — import-ready
-- `vault/bitwarden_export.dedup.audit.json` — per-group record
-
-Override with `--output` / `--audit` (point at `/tmp/` or `vault/`, never
-at `examples/`):
+Override the default sibling output/audit paths (point at `/tmp/` or
+`vault/`, never at `examples/`):
 
 ```bash
 cargo run --release --bin bitwarden-dedup -- \
