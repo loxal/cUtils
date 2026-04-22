@@ -17,6 +17,9 @@
 //! - **collectionIds** — set union (Bitwarden supports multi-collection)
 //! - **folderId** — single-valued, so survivor's wins; differing drops
 //!   contribute a `[bitwarden-dedup] originally also in folder: …` note line
+//! - **TOTP** — single-slot; newest non-empty `login.totp` across the group
+//!   (by `revisionDate`) wins. Older rotations are dropped because they
+//!   no longer authenticate. Presence-only beats absence.
 //! - **favorite** — logical OR
 //! - **name** — longest raw name in the group (ties keep survivor's)
 
@@ -40,6 +43,9 @@ pub(crate) struct SurvivorPatch {
     /// survivor's. Prepended to notes on import so the placement hint is
     /// preserved even though Bitwarden allows only one folder per item.
     pub(crate) folder_note_line: Option<String>,
+    /// The newest non-empty TOTP across the group (by `revisionDate`), or
+    /// `None` when every item in the group has an empty/missing `login.totp`.
+    pub(crate) totp: Option<String>,
     pub(crate) favorite: bool,
 }
 
@@ -89,7 +95,14 @@ pub(crate) fn build_survivor_patch(
     //    after import.
     let folder_note_line = folder_disambiguation_note(keep, drops, folders);
 
-    // 8. Favorite: any item favorited → merged item favorited.
+    // 8. TOTP: single-slot — pick the newest non-empty TOTP across the group
+    //    by `revisionDate`. A rotated older secret is no longer valid
+    //    against the backend, so replacing it with the newer one is safe.
+    //    Presence beats absence: if the survivor has no TOTP but a drop does,
+    //    that secret moves onto the survivor.
+    let totp = newest_totp_across_group(keep, drops);
+
+    // 9. Favorite: any item favorited → merged item favorited.
     let favorite = item_is_favorite(keep) || drops.iter().any(|d| item_is_favorite(d));
 
     SurvivorPatch {
@@ -100,6 +113,7 @@ pub(crate) fn build_survivor_patch(
         field_additions,
         collection_additions,
         folder_note_line,
+        totp,
         favorite,
     }
 }
@@ -171,7 +185,7 @@ pub(crate) fn apply_survivor_patch(item: &mut Value, patch: SurvivorPatch) {
         }
     }
 
-    // URIs: merged into login.uris.
+    // URIs and TOTP: merged into the login object.
     if let Some(login) = item.get_mut("login").and_then(Value::as_object_mut) {
         if !patch.uri_additions.is_empty() {
             let mut uris = login
@@ -182,7 +196,37 @@ pub(crate) fn apply_survivor_patch(item: &mut Value, patch: SurvivorPatch) {
             uris.extend(patch.uri_additions);
             login.insert("uris".to_string(), Value::Array(uris));
         }
+        if let Some(totp) = patch.totp {
+            login.insert("totp".to_string(), Value::String(totp));
+        }
     }
+}
+
+/// Pick the newest non-empty `login.totp` across `keep` + `drops`, ranking
+/// by `revisionDate` descending. Returns `None` when every item in the
+/// group has an empty or missing TOTP.
+///
+/// Older TOTP rotations are intentionally discarded — the backend no
+/// longer accepts them, and the single-slot shape of Bitwarden's schema
+/// means we must pick one.
+fn newest_totp_across_group(keep: &Value, drops: &[&Value]) -> Option<String> {
+    std::iter::once(keep)
+        .chain(drops.iter().copied())
+        .filter_map(|item| {
+            let totp = item
+                .get("login")
+                .and_then(|l| l.get("totp"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())?;
+            let rev = item
+                .get("revisionDate")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Some((totp.to_string(), rev))
+        })
+        .max_by(|a, b| a.1.cmp(&b.1))
+        .map(|(t, _)| t)
 }
 
 fn item_is_favorite(item: &Value) -> bool {
@@ -421,5 +465,59 @@ mod tests {
         let linked_user = json!({"name": "Autofill", "value": null, "type": 3, "linkedId": 100});
         let linked_pass = json!({"name": "Autofill", "value": null, "type": 3, "linkedId": 101});
         assert_ne!(field_key(&linked_user), field_key(&linked_pass));
+    }
+
+    #[test]
+    fn newest_totp_picks_latest_revision() {
+        // Survivor has an older TOTP; a drop has a newer one. The newer
+        // secret must win — that's the one currently valid on the backend.
+        let keep = json!({
+            "revisionDate": "2025-01-01T00:00:00Z",
+            "login": {"totp": "otpauth://totp/A?secret=OLD"}
+        });
+        let drop = json!({
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"totp": "otpauth://totp/A?secret=NEW"}
+        });
+        let picked = newest_totp_across_group(&keep, &[&drop]);
+        assert_eq!(picked.as_deref(), Some("otpauth://totp/A?secret=NEW"));
+    }
+
+    #[test]
+    fn newest_totp_prefers_present_over_absent() {
+        // Survivor has no TOTP; a drop does. The drop's secret moves onto
+        // the survivor — absence must not overwrite presence.
+        let keep = json!({
+            "revisionDate": "2026-02-01T00:00:00Z",
+            "login": {}
+        });
+        let drop = json!({
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"totp": "otpauth://totp/A?secret=ONLY"}
+        });
+        let picked = newest_totp_across_group(&keep, &[&drop]);
+        assert_eq!(picked.as_deref(), Some("otpauth://totp/A?secret=ONLY"));
+    }
+
+    #[test]
+    fn newest_totp_returns_none_when_group_has_no_totp() {
+        let keep = json!({"login": {}});
+        let drop = json!({"login": {}});
+        assert!(newest_totp_across_group(&keep, &[&drop]).is_none());
+    }
+
+    #[test]
+    fn newest_totp_ignores_empty_string_totp() {
+        // Some exports carry `"totp": ""`. Treat that as missing.
+        let keep = json!({
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"totp": ""}
+        });
+        let drop = json!({
+            "revisionDate": "2025-01-01T00:00:00Z",
+            "login": {"totp": "otpauth://totp/A?secret=REAL"}
+        });
+        let picked = newest_totp_across_group(&keep, &[&drop]);
+        assert_eq!(picked.as_deref(), Some("otpauth://totp/A?secret=REAL"));
     }
 }

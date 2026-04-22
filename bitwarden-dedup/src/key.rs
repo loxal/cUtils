@@ -15,9 +15,18 @@
 //!                   disambiguate UI-level collisions)
 //! - username       (trim-only — case is preserved)
 //! - password       (exact)
-//! - TOTP secret    (exact; empty and non-empty never collapse)
-//! - FIDO2 creds    (canonical serialized full objects, not just credentialIds)
+//! - FIDO2 creds    (canonical serialized full objects, not just credentialIds —
+//!                   different passkeys keep items distinct so no passkey is
+//!                   ever overwritten)
 //! - organizationId (personal vs org; never cross-dedup)
+//!
+//! **TOTP is deliberately not in the key.** A Bitwarden item has a single
+//! `login.totp` slot, so two items sharing every credential field but
+//! differing only in TOTP represent the same account with a rotated secret.
+//! [`crate::merge`] picks the newest TOTP across the group; older rotations
+//! are dropped (they no longer authenticate against the backend anyway).
+//! This is the only field where dedup can displace user-entered data —
+//! everything else is either in the key (distinct-preserving) or union-merged.
 
 use serde_json::Value;
 
@@ -25,15 +34,16 @@ use crate::json_util::get_str;
 
 /// Duplicate-equality key for a Bitwarden login item.
 ///
-/// **Invariant**: the key contains every field that Bitwarden stores as a
-/// single-valued slot. Items that disagree on any of these fields end up in
-/// different groups, so no single-valued user data is ever overwritten or
-/// silently discarded by dedup. In particular:
+/// **Invariants**:
 ///
 /// - Distinct `(username, password)` pairs are never collapsed.
-/// - Distinct TOTP secrets are never collapsed (including empty-vs-non-empty).
-/// - Distinct FIDO2 credential sets are never collapsed.
+/// - Distinct FIDO2 credential sets are never collapsed — passkeys are
+///   never overwritten.
 /// - Personal items never merge with org-owned items.
+///
+/// TOTP is **not** in the key; items that differ only in TOTP represent
+/// the same account with a rotated secret, and [`crate::merge`] keeps the
+/// newest TOTP on the survivor.
 pub fn dedup_key(item: &Value) -> String {
     let name = normalize_name(get_str(item, "name"));
     let login = item.get("login");
@@ -47,16 +57,12 @@ pub fn dedup_key(item: &Value) -> String {
         .and_then(|l| l.get("password"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let totp = login
-        .and_then(|l| l.get("totp"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
     let fido2 = fido2_signature(item);
     let org_id = item
         .get("organizationId")
         .and_then(Value::as_str)
         .unwrap_or("");
-    format!("{name}\0{user}\0{pw}\0{totp}\0{fido2}\0{org_id}")
+    format!("{name}\0{user}\0{pw}\0{fido2}\0{org_id}")
 }
 
 /// Strip a trailing ` (something@else)` disambiguation suffix from a name and
@@ -223,12 +229,37 @@ mod tests {
     }
 
     #[test]
-    fn dedup_key_differs_on_totp() {
+    fn dedup_key_ignores_totp_differences() {
+        // TOTP is intentionally out of the key — items differing only on TOTP
+        // are the same account with a rotated secret. [`crate::merge`] picks
+        // the newest TOTP for the survivor.
         let mut a = login("GitHub", "a@b.com", "pw");
         let mut b = login("GitHub", "a@b.com", "pw");
         a["login"]["totp"] = json!("otpauth://totp/A?secret=ABC");
         b["login"]["totp"] = json!("otpauth://totp/A?secret=XYZ");
-        assert_ne!(dedup_key(&a), dedup_key(&b));
+        assert_eq!(
+            dedup_key(&a),
+            dedup_key(&b),
+            "TOTP rotation must not prevent dedup"
+        );
+    }
+
+    #[test]
+    fn dedup_key_still_splits_on_passkey_even_when_totp_also_differs() {
+        // Passkeys are strict-match. Even if TOTP-relaxation would otherwise
+        // merge two items, a distinct FIDO2 credential on either side must
+        // keep them separate so no passkey is overwritten.
+        let mut a = login("GitHub", "a@b.com", "pw");
+        let mut b = login("GitHub", "a@b.com", "pw");
+        a["login"]["totp"] = json!("otpauth://totp/A?secret=ABC");
+        b["login"]["totp"] = json!("otpauth://totp/A?secret=XYZ");
+        a["login"]["fido2Credentials"] = json!([{"credentialId": "pk-alice"}]);
+        b["login"]["fido2Credentials"] = json!([{"credentialId": "pk-bob"}]);
+        assert_ne!(
+            dedup_key(&a),
+            dedup_key(&b),
+            "distinct passkeys must keep items separate regardless of TOTP"
+        );
     }
 
     #[test]

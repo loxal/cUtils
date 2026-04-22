@@ -77,14 +77,14 @@ survivor so nothing the user typed is lost.
 | `name` | case-insensitive, trimmed, with trailing `(email@address)` disambiguation suffix stripped (e.g. `okta.com (alice@corp.com)` groups with `okta.com`) |
 | `login.username` | trimmed; case is **preserved** — `Alice` and `alice` never collapse, because some backends treat usernames as case-sensitive |
 | `login.password` | exact |
-| `login.totp` | exact — distinct TOTP secrets never merge |
-| `login.fido2Credentials` | canonical equality of the full credential objects (not just `credentialId`); divergent `counter` / `userHandle` / key metadata keeps items distinct |
+| `login.fido2Credentials` | canonical equality of the full credential objects (not just `credentialId`); divergent `counter` / `userHandle` / key metadata keeps items distinct — **passkeys are never overwritten by merge** |
 | `organizationId` | exact — personal and organization items never cross-dedup (they live in different vaults with different access control) |
 
 **Survivor-merge fields — retained from every item in the duplicate group:**
 
 | Field | Merge rule |
 |---|---|
+| `login.totp` | single-slot in Bitwarden; the **newest** non-empty TOTP across the group wins (by `revisionDate`). Older rotations are intentionally dropped — they no longer authenticate against the backend. Presence beats absence: a survivor without a TOTP inherits any drop's. This is the only field dedup can displace |
 | `notes` | union of distinct non-empty bodies joined by `\n---\n`; dedup key is the trimmed body, but the **raw** text (including surrounding whitespace) is preserved in the output |
 | `fields` (custom fields) | union by `(name, value, type, linkedId)` tuple — `linkedId` is the Bitwarden integer that identifies a Linked field's target (`100` = Username, `101` = Password, confirmed from live API) |
 | `passwordHistory` | union by `(lastUsedDate, password)`, sorted newest-first after merge |
