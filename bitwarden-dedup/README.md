@@ -66,25 +66,39 @@ that happen to share a display name. On a real vault with ~1,700 logins, the
 loose approach produces dozens of false-positive groups where the passwords
 actually differ — those are separate accounts, not duplicates.
 
-`bitwarden-dedup` drops an item only when **every** safety-relevant field
-matches the item it will be merged into:
+`bitwarden-dedup` drops an item only when **every** dedup-key field matches,
+and every other piece of information from the dropped item is merged into the
+survivor so nothing the user typed is lost.
+
+**Dedup key — items with any of these differences never group:**
 
 | Field | Matching rule |
 |---|---|
-| `name` | case-insensitive, trimmed |
-| `login.username` | case-insensitive, trimmed |
+| `name` | case-insensitive, trimmed, with trailing `(email@address)` disambiguation suffix stripped (e.g. `okta.com (alice@corp.com)` groups with `okta.com`) |
+| `login.username` | trimmed; case is **preserved** — `Alice` and `alice` never collapse, because some backends treat usernames as case-sensitive |
 | `login.password` | exact |
-| `login.totp` | exact |
-| `login.fido2Credentials` (credential ids) | exact set |
-| `notes` | trimmed |
-| `fields` (custom fields) | `(name, value, type, linkedId)` tuples, order-insensitive — `linkedId` is the Bitwarden integer that identifies a Linked field's target (`100` = Username, `101` = Password, confirmed from live API) |
-| `favorite` | exact |
+| `login.totp` | exact — distinct TOTP secrets never merge |
+| `login.fido2Credentials` | canonical equality of the full credential objects (not just `credentialId`); divergent `counter` / `userHandle` / key metadata keeps items distinct |
 | `organizationId` | exact — personal and organization items never cross-dedup (they live in different vaults with different access control) |
 
-For each duplicate group, the item with the newest `revisionDate` wins the
-tiebreak (fallback: `creationDate`). Any URIs present on dropped items but
-missing from the kept item are merged into the kept item so no login URL is
-ever lost.
+**Survivor-merge fields — retained from every item in the duplicate group:**
+
+| Field | Merge rule |
+|---|---|
+| `notes` | union of distinct non-empty bodies joined by `\n---\n`; dedup key is the trimmed body, but the **raw** text (including surrounding whitespace) is preserved in the output |
+| `fields` (custom fields) | union by `(name, value, type, linkedId)` tuple — `linkedId` is the Bitwarden integer that identifies a Linked field's target (`100` = Username, `101` = Password, confirmed from live API) |
+| `passwordHistory` | union by `(lastUsedDate, password)`, sorted newest-first after merge |
+| `login.uris` | union by `(uri, match_mode)` — different detection modes on the same URL survive as separate entries |
+| `collectionIds` | set union across the group — Bitwarden natively supports multiple collection memberships, so unioning is lossless |
+| `folderId` | survivor's folder wins (Bitwarden allows one folder per item); any dropped items with a different folder leave a `[bitwarden-dedup] originally also in folder: <names>` line prepended to `notes` so the placement hint survives import |
+| `favorite` | logical OR — any item favorited in the group → survivor favorited |
+| `name` | longest raw name in the group wins (ties keep the survivor's own name) |
+
+**Survivor selection** — when two items share every key field:
+
+1. Longer `passwordHistory` array wins (captures more rotation records)
+2. Then newer `revisionDate`
+3. Then newer `creationDate`
 
 Items that are **never** grouped (passed through unchanged):
 

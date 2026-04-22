@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use bitwarden_dedup::dedup_items;
+use bitwarden_dedup::dedup_export;
 use clap::Parser;
 use serde_json::{Value, json};
 
@@ -71,16 +71,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut data: Value = serde_json::from_str(&text)
         .map_err(|e| format!("parsing {}: {e}", input_path.display()))?;
 
-    let mut items: Vec<Value> = match data.as_object_mut().and_then(|o| o.get_mut("items")) {
-        Some(Value::Array(arr)) => std::mem::take(arr),
-        _ => return Err("missing 'items' array in export".into()),
-    };
-
-    let stats = dedup_items(&mut items);
-
-    if let Some(obj) = data.as_object_mut() {
-        obj.insert("items".to_string(), Value::Array(items));
+    if data.get("items").and_then(Value::as_array).is_none() {
+        return Err("missing 'items' array in export".into());
     }
+
+    // `dedup_export` reads the top-level `folders` array so the folder
+    // disambiguation note on merged items uses human-readable folder names
+    // instead of opaque UUIDs.
+    let stats = dedup_export(&mut data);
 
     write_sensitive(&output_path, &serde_json::to_string_pretty(&data)?)?;
 
@@ -104,12 +102,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Groups:        {} strict duplicate groups", stats.groups);
     println!(
-        "Removed:       {} items (kept newest by revisionDate)",
+        "Removed:       {} items (survivor picked by longer passwordHistory, then newer revisionDate)",
         stats.removed
     );
     println!(
         "URIs merged:   {} unique URLs preserved from dropped items",
         stats.merged
+    );
+    println!(
+        "               (notes, custom fields, and passwordHistory are also merged into survivors)"
     );
     println!("Output:        {}", output_path.display());
     println!("               {} items", stats.output);
