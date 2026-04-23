@@ -55,6 +55,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use bitwarden_dedup::io_util::write_sensitive_atomic;
 use bitwarden_dedup::{dedup_key, skip_from_dedup};
 use clap::Parser;
 use serde_json::{Map, Value, json};
@@ -184,7 +185,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = cli.output.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&cli.output, serde_json::to_string_pretty(&output)?)?;
+    // Redacted output carries vault-shape metadata (item counts, URI
+    // schemes, folder ids, etc.), so even though credential material is
+    // scrubbed it is still sensitive. Use the same 0o600 atomic writer
+    // the main binaries use.
+    write_sensitive_atomic(&cli.output, &serde_json::to_string_pretty(&output)?)?;
 
     println!("Input:   {}", cli.input.display());
     println!("Output:  {}", cli.output.display());

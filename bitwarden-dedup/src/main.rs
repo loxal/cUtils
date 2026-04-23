@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use bitwarden_dedup::io_util::write_sensitive_atomic;
 use bitwarden_dedup::{DedupConfig, dedup_export_with_config};
 use clap::Parser;
 use serde_json::{Value, json};
@@ -93,7 +94,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let stats = dedup_export_with_config(&mut data, &config);
 
-    write_sensitive(&output_path, &serde_json::to_string_pretty(&data)?)?;
+    write_sensitive_atomic(&output_path, &serde_json::to_string_pretty(&data)?)?;
 
     let audit_doc = json!({
         "input": input_path.to_string_lossy(),
@@ -111,7 +112,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "uris_merged_into_kept_total": stats.merged,
         "entries": stats.audit_entries,
     });
-    write_sensitive(&audit_path, &serde_json::to_string_pretty(&audit_doc)?)?;
+    write_sensitive_atomic(&audit_path, &serde_json::to_string_pretty(&audit_doc)?)?;
 
     println!("Input:         {}", input_path.display());
     println!(
@@ -249,53 +250,9 @@ fn check_paths_distinct(
     ))
 }
 
-/// Write sensitive content to `path` with owner-only permissions on Unix.
-///
-/// On macOS/Linux this creates the file with mode `0o600` and then re-applies
-/// `0o600` after writing to cover the case where the file already existed
-/// with looser permissions. On non-Unix platforms this falls back to
-/// `fs::write`.
-#[cfg(unix)]
-fn write_sensitive(path: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(content.as_bytes())?;
-    drop(file);
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_sensitive(path: &Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, content)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tmp(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("bwd-test-{}-{name}", std::process::id()))
-    }
 
     #[test]
     fn path_safety_rejects_output_equals_input() {
@@ -364,29 +321,7 @@ mod tests {
         assert!(r.is_err(), "path safety should collapse '.' segments");
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn write_sensitive_creates_file_with_0o600_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let path = tmp("sensitive.json");
-        let _ = fs::remove_file(&path);
-        write_sensitive(&path, "{}").expect("write");
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "new file must be owner-only");
-        fs::remove_file(&path).ok();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_sensitive_fixes_existing_loose_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let path = tmp("loose.json");
-        fs::write(&path, "loose").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        write_sensitive(&path, "tight").expect("rewrite");
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "existing file must be chmod'd to owner-only");
-        fs::remove_file(&path).ok();
-    }
+    // Low-level write_sensitive_atomic has its own unit tests in
+    // `src/io_util.rs`; we don't re-prove 0o600 behavior from main.rs.
 
 }

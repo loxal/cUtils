@@ -25,6 +25,7 @@
 //! Android spec.
 
 mod icloud;
+pub mod io_util;
 mod json_util;
 mod key;
 mod merge;

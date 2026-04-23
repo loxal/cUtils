@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use bitwarden_dedup::io_util::write_sensitive_atomic;
 use bitwarden_dedup::{DedupConfig, merge_icloud_csv_into_export_with_config};
 use clap::Parser;
 use serde_json::{Value, json};
@@ -91,12 +92,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if !export.is_object() {
         return Err("Bitwarden export must be a top-level JSON object".into());
     }
-    if export.get("items").and_then(Value::as_array).is_none()
-        && !export
-            .as_object_mut()
-            .is_some_and(|o| o.contains_key("items"))
-    {
-        return Err("Bitwarden export missing `items` array".into());
+    // If `items` is present at all, it must be an array — otherwise
+    // this is not a valid Bitwarden export and merging on top of it
+    // would silently discard whatever the field contained. Missing
+    // `items` is fine (the merge path will create one).
+    match export.get("items") {
+        Some(Value::Array(_)) | None => {}
+        Some(_) => {
+            return Err(
+                "Bitwarden export `items` field exists but is not an array. Refusing to proceed."
+                    .into(),
+            );
+        }
     }
 
     let config = DedupConfig {
@@ -104,7 +111,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let stats = merge_icloud_csv_into_export_with_config(&mut export, &csv_text, &config)?;
 
-    write_sensitive(&output_path, &serde_json::to_string_pretty(&export)?)?;
+    write_sensitive_atomic(&output_path, &serde_json::to_string_pretty(&export)?)?;
 
     let dedup = &stats.dedup_stats;
     let audit_doc = json!({
@@ -125,7 +132,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "uris_merged_into_kept_total": dedup.merged,
         "entries": dedup.audit_entries.clone(),
     });
-    write_sensitive(&audit_path, &serde_json::to_string_pretty(&audit_doc)?)?;
+    write_sensitive_atomic(&audit_path, &serde_json::to_string_pretty(&audit_doc)?)?;
 
     println!("Bitwarden input: {}", bw_path.display());
     println!("iCloud CSV:      {}", csv_path.display());
@@ -253,34 +260,3 @@ fn check_paths_distinct(paths: &[&Path], force: bool) -> Result<(), String> {
     ))
 }
 
-/// Write sensitive content with owner-only permissions on Unix.
-#[cfg(unix)]
-fn write_sensitive(path: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(content.as_bytes())?;
-    drop(file);
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_sensitive(path: &Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, content)
-}

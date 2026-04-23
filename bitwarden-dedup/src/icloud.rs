@@ -93,17 +93,30 @@ pub fn merge_icloud_csv_into_export_with_config(
         new_items.push(row_to_bitwarden_item(row, idx as u64, epoch_secs, &ts));
     }
 
-    // Append to existing items.
-    if let Some(items) = export
-        .as_object_mut()
-        .and_then(|o| o.get_mut("items"))
-        .and_then(Value::as_array_mut)
-    {
-        items.extend(new_items.iter().cloned());
-    } else if let Some(obj) = export.as_object_mut() {
-        obj.insert("items".to_string(), Value::Array(new_items.clone()));
-    } else {
-        return Err("export JSON is not an object".into());
+    // Append to existing items. Fail fast if the export has an `items`
+    // field that is NOT an array — silently overwriting it with a fresh
+    // array would discard whatever the file actually held (a damaged
+    // export, a wrong file entirely) and produce an output that looks
+    // valid but isn't a faithful transformation of the input.
+    let Some(obj) = export.as_object_mut() else {
+        return Err("Bitwarden export is not a top-level JSON object".into());
+    };
+    match obj.get_mut("items") {
+        Some(Value::Array(items)) => {
+            items.extend(new_items.iter().cloned());
+        }
+        Some(other) => {
+            return Err(format!(
+                "Bitwarden export `items` field is not an array (found {}). \
+                 Refusing to overwrite it — is this the right file?",
+                describe_value(other)
+            ));
+        }
+        None => {
+            // Allow bootstrap of an empty export that only carries
+            // `{folders: [...]}` or similar.
+            obj.insert("items".to_string(), Value::Array(new_items.clone()));
+        }
     }
 
     let csv_items_appended = new_items.len();
@@ -220,18 +233,48 @@ fn empty_to_null(s: &str) -> Value {
     }
 }
 
+fn describe_value(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 // --- CSV parser (RFC 4180-ish) ------------------------------------------
+
+/// The six header names Apple's Passwords app emits on every CSV export
+/// we've seen (`Title`, `URL`, `Username`, `Password`, `Notes`, `OTPAuth`).
+/// Matched case-insensitively after trim, so minor capitalization drift
+/// in a future Apple release still parses.
+const APPLE_REQUIRED_HEADERS: &[&str] =
+    &["title", "url", "username", "password", "notes", "otpauth"];
 
 /// Parse an Apple Passwords CSV. Handles double-quoted fields, escaped
 /// quotes (`""` → `"`), and embedded newlines inside quoted fields.
 ///
-/// Header row is consumed and used to map columns by name so we're robust
-/// to column reordering or future additions. Unknown columns are ignored;
-/// missing columns produce empty strings.
+/// **Fail-fast validation** (the tool's output feeds straight into a
+/// purge-and-reimport flow, so silent best-effort parsing of a
+/// wrong-shaped file is unsafe):
+///
+/// - The CSV must have at least a header row.
+/// - Every one of [`APPLE_REQUIRED_HEADERS`] must be present. Extra
+///   columns beyond those six are allowed (forward-compat for future
+///   Apple additions) but missing any required one is a hard error —
+///   that is how we reject non-Apple CSVs pointed at this tool by
+///   mistake.
+/// - The CSV must not end with an unterminated quoted field. That is a
+///   syntax error no well-formed Apple export would produce.
 pub(crate) fn parse_apple_passwords_csv(text: &str) -> Result<Vec<AppleRow>, String> {
-    let mut rows = raw_parse_csv(text);
+    let mut rows = raw_parse_csv(text)?;
     if rows.is_empty() {
-        return Ok(Vec::new());
+        return Err(
+            "iCloud CSV is empty — expected an Apple Passwords header row plus data."
+                .to_string(),
+        );
     }
     let header = rows.remove(0);
     let col_index: HashMap<String, usize> = header
@@ -240,7 +283,24 @@ pub(crate) fn parse_apple_passwords_csv(text: &str) -> Result<Vec<AppleRow>, Str
         .map(|(i, h)| (h.trim().to_ascii_lowercase(), i))
         .collect();
 
-    // Apple header names, case-insensitive.
+    let mut missing: Vec<&str> = Vec::new();
+    for want in APPLE_REQUIRED_HEADERS {
+        if !col_index.contains_key(*want) {
+            missing.push(*want);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "iCloud CSV header does not look like an Apple Passwords export — \
+             missing required column(s): {}. Found: {:?}. Expected (case-insensitive): {:?}.",
+            missing.join(", "),
+            header,
+            APPLE_REQUIRED_HEADERS,
+        ));
+    }
+
+    // Apple header names, case-insensitive. `pick` is total here because
+    // every required column was confirmed above.
     let pick = |row: &[String], key: &str| -> String {
         col_index
             .get(key)
@@ -263,7 +323,7 @@ pub(crate) fn parse_apple_passwords_csv(text: &str) -> Result<Vec<AppleRow>, Str
     Ok(out)
 }
 
-fn raw_parse_csv(text: &str) -> Vec<Vec<String>> {
+fn raw_parse_csv(text: &str) -> Result<Vec<Vec<String>>, String> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut field = String::new();
     let mut row: Vec<String> = Vec::new();
@@ -306,12 +366,19 @@ fn raw_parse_csv(text: &str) -> Vec<Vec<String>> {
         }
         i += 1;
     }
+    // If the file ended mid-quote the CSV is malformed — refuse it
+    // rather than silently accept a field that was never closed.
+    if in_quotes {
+        return Err(
+            "iCloud CSV ends inside a quoted field — malformed export (unterminated quote).".to_string(),
+        );
+    }
     // Flush any unterminated final line.
     if !field.is_empty() || !row.is_empty() {
         row.push(field);
         rows.push(row);
     }
-    rows
+    Ok(rows)
 }
 
 // --- Tests --------------------------------------------------------------
