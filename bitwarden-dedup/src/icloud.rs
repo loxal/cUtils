@@ -706,6 +706,53 @@ mod tests {
     }
 
     #[test]
+    fn merge_leaves_standalone_bitwarden_secure_notes_untouched() {
+        // A Bitwarden secure note (`type: 2`) carrying a recovery-code
+        // body that happens to look similar to a CSV row's content must
+        // stay byte-identical after merge — secure notes never enter
+        // the dedup grouping step.
+        let secure_note = json!({
+            "id": "bw-note",
+            "type": 2,
+            "name": "Wallet seed phrase",
+            "notes": "word1 word2 word3 word4 word5 word6\nword7 word8 word9 word10 word11 word12",
+            "folderId": "folder-security",
+            "favorite": true,
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "creationDate": "2025-01-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        });
+        let mut export = json!({
+            "folders": [],
+            "items": [secure_note.clone()]
+        });
+        // CSV row with a Title+Notes that vaguely resembles the seed
+        // phrase body. It becomes its own synthetic secure note — it
+        // must not cross-contaminate the Bitwarden one.
+        let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
+                   \"Wallet seed phrase\",,,,\"some other wallet notes\",\n";
+        merge_icloud_csv_into_export(&mut export, csv).unwrap();
+        let items = export["items"].as_array().unwrap();
+        let survivor = items
+            .iter()
+            .find(|i| i["id"].as_str() == Some("bw-note"))
+            .expect("Bitwarden secure note must still be in output");
+        assert_eq!(
+            *survivor, secure_note,
+            "existing Bitwarden secure note must be preserved byte-identical"
+        );
+        // And the CSV-derived secure note is added as a fresh item.
+        assert!(
+            items.iter().any(|i| {
+                i["type"] == 2
+                    && i["notes"].as_str() == Some("some other wallet notes")
+                    && i["deletedDate"].is_null()
+            }),
+            "CSV note-only row must be added as a fresh living secure note"
+        );
+    }
+
+    #[test]
     fn merge_empty_csv_is_noop() {
         let mut export = json!({
             "folders": [],

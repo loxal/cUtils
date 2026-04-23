@@ -105,14 +105,19 @@ survivor so nothing the user typed is lost.
 2. Then newer `revisionDate`
 3. Then newer `creationDate`
 
-Items that are **never** grouped (passed through unchanged):
+Items that are **never** grouped (passed through byte-identical):
 
-- non-login types (cards, identities, secure notes)
+- **non-login types** — **Secure Notes (`type: 2`)**, cards (`type: 3`),
+  identities (`type: 4`), SSH keys (`type: 5`). They sidestep the dedup
+  grouping step entirely, so every field the user typed (notes body,
+  custom fields, favorite flag, folder placement) lands in the output
+  exactly as it came in. Two Secure Notes with identical bodies are
+  kept as two separate items — we don't guess at note identity.
 - items with `reprompt == 1` (master-password gated — too sensitive to
   auto-merge)
 - items with an empty password (would spuriously group on `""`)
 - items whose name already contains `[duplicate]`
-- deleted items (trash)
+- already-trashed items (their `deletedDate` is preserved as-is)
 
 ### A note on the TOTP heuristic
 
@@ -241,6 +246,14 @@ array, then the shared dedup pipeline runs:
 - **Custom fields, passwordHistory, collectionIds, folder hints,
   favorite flag** — all merged exactly as they are for pure-Bitwarden
   dedup runs.
+- **Standalone Secure Notes** already in the Bitwarden vault
+  (`type: 2` — recovery codes, seed phrases, scanned document
+  fragments, anything that is not a login) are **preserved byte-
+  identical**. They never enter the dedup grouping step, so nothing
+  the user typed in a note body can be overwritten by a merge. A
+  note-only CSV row (Title + Notes only, no credentials) is added as
+  its own fresh `type: 2` Secure Note item; it does not touch any
+  existing Secure Note even if the contents look similar.
 
 ### What is **not** merged
 

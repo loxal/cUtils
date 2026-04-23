@@ -270,6 +270,106 @@ fn split_divergent_totps_opt_in_keeps_items_separate() {
 }
 
 #[test]
+fn standalone_secure_notes_pass_through_unchanged() {
+    // Bitwarden `type: 2` (Secure Note) items — recovery codes, Wi-Fi
+    // passwords written down, crypto wallet seed phrases, etc. — are
+    // never part of a dedup group. They must land in the output byte-
+    // identical to the input so no user-typed note text is ever lost.
+    let secure_note_input = json!({
+        "id": "note-1",
+        "type": 2,
+        "name": "Recovery codes — GitHub",
+        "notes": "  Line 1: backup code AAAA-BBBB\n  Line 2: backup code CCCC-DDDD  ",
+        "folderId": "folder-security",
+        "favorite": true,
+        "fields": [
+            {"name": "where", "value": "Generated 2026-01-01", "type": 0}
+        ],
+        "revisionDate": "2026-01-02T00:00:00Z",
+        "creationDate": "2026-01-01T00:00:00Z",
+        "secureNote": {"type": 0}
+    });
+    let mut items = vec![
+        secure_note_input.clone(),
+        // A normal login item in the same run so the pipeline actually
+        // runs; the note must not be touched by anything the login path
+        // does.
+        json!({"type": 1, "name": "Gmail",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"}}),
+    ];
+    let stats = dedup_items(&mut items);
+    assert_eq!(stats.trashed, 0);
+    // Find our secure note in the output.
+    let survivor = items
+        .iter()
+        .find(|i| i["id"].as_str() == Some("note-1"))
+        .expect("secure note must still be in output");
+    // Every field on the input note is preserved byte-identical.
+    assert_eq!(*survivor, secure_note_input);
+}
+
+#[test]
+fn secure_notes_do_not_collapse_with_each_other() {
+    // Even if two `type: 2` items share the same `name` and `notes`,
+    // the dedup pipeline must leave both alone. We do not try to be
+    // clever about secure-note identity — their content can be
+    // arbitrarily similar and still represent different records (two
+    // separate sets of recovery codes, for example).
+    let mut items = vec![
+        json!({
+            "id": "n-a", "type": 2, "name": "Recovery",
+            "notes": "codes",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        }),
+        json!({
+            "id": "n-b", "type": 2, "name": "Recovery",
+            "notes": "codes",
+            "revisionDate": "2026-02-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        }),
+    ];
+    let stats = dedup_items(&mut items);
+    assert_eq!(stats.trashed, 0, "secure notes must never be trashed by dedup");
+    assert_eq!(living(&items).len(), 2, "both secure notes stay living");
+}
+
+#[test]
+fn non_login_types_are_all_preserved() {
+    // Cards (type 3), identities (type 4), SSH keys (type 5) — none
+    // of these flow through the dedup grouping step. They pass through
+    // regardless of what other items share their name.
+    let mut items = vec![
+        json!({"id": "card", "type": 3, "name": "Visa",
+            "revisionDate": "2026-01-01T00:00:00Z"}),
+        json!({"id": "ident", "type": 4, "name": "Personal",
+            "revisionDate": "2026-01-01T00:00:00Z"}),
+        json!({"id": "ssh",   "type": 5, "name": "laptop-key",
+            "revisionDate": "2026-01-01T00:00:00Z"}),
+        // A duplicate login group alongside — makes sure the non-login
+        // pass-through is unaffected by dedup activity elsewhere.
+        json!({"id": "login-a", "type": 1, "name": "Site",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"}}),
+        json!({"id": "login-b", "type": 1, "name": "Site",
+            "revisionDate": "2026-02-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"}}),
+    ];
+    dedup_items(&mut items);
+    for want_id in ["card", "ident", "ssh"] {
+        let item = items
+            .iter()
+            .find(|i| i["id"].as_str() == Some(want_id))
+            .unwrap_or_else(|| panic!("{want_id} missing from output"));
+        assert!(
+            item["deletedDate"].is_null(),
+            "{want_id} must not be trashed by dedup"
+        );
+    }
+}
+
+#[test]
 fn dedup_never_removes_items_from_output() {
     // Core invariant: no matter how aggressive the dedup, `items.len()`
     // after dedup must equal `items.len()` before. Losers are trashed
