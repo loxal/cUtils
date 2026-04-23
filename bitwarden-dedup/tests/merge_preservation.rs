@@ -3,8 +3,7 @@
 //! Merge-preservation guards: every field that is NOT in the dedup key
 //! must survive as merged data on the survivor.
 //!
-//! These are the invariants that give the "no user-entered data is lost"
-//! guarantee real teeth:
+//! Invariants:
 //!
 //! - distinct notes are preserved (including folder-disambiguation prefix)
 //! - URIs are unioned across drops
@@ -13,12 +12,22 @@
 //! - passwordHistory entries are unioned and sorted newest-first
 //! - favorite is a logical OR across the group
 //! - longer raw name wins on the merged record
+//! - losers stay in the output with `deletedDate` set (Bitwarden Trash)
 //!
-//! Tests drive the public `dedup_items` / `dedup_export` entry points so the
-//! contract stays honest — no peeking at private helpers.
+//! Tests drive the public `dedup_items` / `dedup_export` entry points.
 
 use bitwarden_dedup::{dedup_export, dedup_items};
 use serde_json::{Value, json};
+
+fn living(items: &[Value]) -> Vec<&Value> {
+    items.iter().filter(|i| i["deletedDate"].is_null()).collect()
+}
+
+fn living_by_dedup_group(items: &[Value]) -> &Value {
+    let alive = living(items);
+    assert_eq!(alive.len(), 1, "expected exactly one living survivor");
+    alive[0]
+}
 
 #[test]
 fn merges_pair_with_uri_union() {
@@ -47,15 +56,17 @@ fn merges_pair_with_uri_union() {
     let stats = dedup_items(&mut items);
     assert_eq!(stats.total, 2);
     assert_eq!(stats.groups, 1);
-    assert_eq!(stats.removed, 1);
+    assert_eq!(stats.trashed, 1);
     assert_eq!(stats.merged, 1);
-    assert_eq!(stats.output, 1);
-    assert_eq!(items.len(), 1);
+    assert_eq!(stats.output, 2, "both items stay in array; loser trashed");
+    assert_eq!(stats.living, 1);
+
+    let survivor = living_by_dedup_group(&items);
     assert_eq!(
-        items[0].get("id").and_then(Value::as_str),
+        survivor.get("id").and_then(Value::as_str),
         Some("bbbbbbbb-0000-0000-0000-000000000000"),
     );
-    let kept_uris: Vec<&str> = items[0]
+    let kept_uris: Vec<&str> = survivor
         .get("login")
         .and_then(|l| l.get("uris"))
         .and_then(Value::as_array)
@@ -92,9 +103,8 @@ fn merges_notes_and_picks_longest_name() {
     ];
     let stats = dedup_items(&mut items);
     assert_eq!(stats.groups, 1);
-    assert_eq!(stats.removed, 1);
-    assert_eq!(items.len(), 1);
-    let survivor = &items[0];
+    assert_eq!(stats.trashed, 1);
+    let survivor = living_by_dedup_group(&items);
     // Longer raw name wins on the merged record.
     assert_eq!(
         survivor.get("name").and_then(Value::as_str),
@@ -124,8 +134,8 @@ fn merges_identical_notes_without_duplication() {
         }),
     ];
     dedup_items(&mut items);
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].get("notes").and_then(Value::as_str), Some("same"));
+    let survivor = living_by_dedup_group(&items);
+    assert_eq!(survivor.get("notes").and_then(Value::as_str), Some("same"));
 }
 
 #[test]
@@ -149,8 +159,8 @@ fn merges_password_history_across_duplicates() {
         }),
     ];
     dedup_items(&mut items);
-    assert_eq!(items.len(), 1);
-    let hist = items[0].get("passwordHistory").and_then(Value::as_array).unwrap();
+    let survivor = living_by_dedup_group(&items);
+    let hist = survivor.get("passwordHistory").and_then(Value::as_array).unwrap();
     assert_eq!(hist.len(), 2, "both historical passwords should be preserved");
     // Newest-first ordering.
     assert_eq!(
@@ -174,17 +184,15 @@ fn favorite_is_logical_or_across_group() {
         }),
     ];
     dedup_items(&mut items);
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].get("favorite").and_then(Value::as_bool), Some(true));
+    let survivor = living_by_dedup_group(&items);
+    assert_eq!(survivor.get("favorite").and_then(Value::as_bool), Some(true));
 }
 
 #[test]
 fn merges_custom_fields_preserving_linked_id() {
     // Two Linked custom fields sharing the same label but pointing at
     // different targets (Username=100, Password=101) must both survive
-    // the merge. Previously this was enforced by keeping fields in the
-    // dedup key; with fields moved out of the key, the merge step has
-    // to keep the distinction.
+    // the merge.
     let mut items = vec![
         json!({
             "type": 1, "name": "X",
@@ -204,8 +212,8 @@ fn merges_custom_fields_preserving_linked_id() {
         }),
     ];
     dedup_items(&mut items);
-    assert_eq!(items.len(), 1);
-    let fields = items[0].get("fields").and_then(Value::as_array).unwrap();
+    let survivor = living_by_dedup_group(&items);
+    let fields = survivor.get("fields").and_then(Value::as_array).unwrap();
     let linked_ids: Vec<i64> = fields
         .iter()
         .filter_map(|f| f.get("linkedId").and_then(Value::as_i64))
@@ -228,8 +236,8 @@ fn preserves_every_distinct_note_in_merged_survivor() {
             "login": {"username": "u", "password": "p"}}),
     ];
     dedup_items(&mut items);
-    assert_eq!(items.len(), 1);
-    let notes = items[0].get("notes").and_then(Value::as_str).unwrap_or("");
+    let survivor = living_by_dedup_group(&items);
+    let notes = survivor.get("notes").and_then(Value::as_str).unwrap_or("");
     assert!(notes.contains("first"), "distinct note 'first' must be merged");
     assert!(notes.contains("second"), "distinct note 'second' must be merged");
     assert!(notes.contains("third"), "distinct note 'third' must be merged");
@@ -237,9 +245,6 @@ fn preserves_every_distinct_note_in_merged_survivor() {
 
 #[test]
 fn unions_collection_ids_across_duplicates() {
-    // Two otherwise-identical org items in different collection sets
-    // must collapse into one survivor whose `collectionIds` contains
-    // both sets — Bitwarden supports multiple collection memberships.
     let mut items = vec![
         json!({
             "type": 1, "name": "Site",
@@ -257,8 +262,8 @@ fn unions_collection_ids_across_duplicates() {
         }),
     ];
     dedup_items(&mut items);
-    assert_eq!(items.len(), 1, "duplicates should collapse");
-    let cols: Vec<&str> = items[0]
+    let survivor = living_by_dedup_group(&items);
+    let cols: Vec<&str> = survivor
         .get("collectionIds")
         .and_then(Value::as_array)
         .unwrap()
@@ -271,9 +276,6 @@ fn unions_collection_ids_across_duplicates() {
 
 #[test]
 fn appends_folder_note_when_drops_differ() {
-    // End-to-end via `dedup_export`: drops with a different folder must
-    // leave a disambiguation line on the survivor so placement isn't
-    // silently lost at import time.
     let mut export = json!({
         "folders": [
             {"id": "folder-keep", "name": "Work"},
@@ -294,10 +296,10 @@ fn appends_folder_note_when_drops_differ() {
             }
         ]
     });
-    let stats = dedup_export(&mut export);
-    assert_eq!(stats.output, 1);
-    let items = export.get("items").and_then(Value::as_array).unwrap();
-    let notes = items[0].get("notes").and_then(Value::as_str).unwrap_or("");
+    dedup_export(&mut export);
+    let items = export["items"].as_array().unwrap();
+    let survivor = living_by_dedup_group(items);
+    let notes = survivor.get("notes").and_then(Value::as_str).unwrap_or("");
     assert!(
         notes.contains("Personal"),
         "dropped folder name must be captured; got {notes:?}"
@@ -325,8 +327,8 @@ fn omits_folder_note_when_folders_match() {
         }),
     ];
     dedup_items(&mut items);
-    assert_eq!(items.len(), 1);
-    let notes = items[0]
+    let survivor = living_by_dedup_group(&items);
+    let notes = survivor
         .get("notes")
         .and_then(Value::as_str)
         .unwrap_or("");
@@ -338,9 +340,6 @@ fn omits_folder_note_when_folders_match() {
 
 #[test]
 fn folder_note_falls_back_to_uuid_without_lookup() {
-    // When the caller has no folders map (direct `dedup_items`), the
-    // folder UUID itself must still appear in the note so the info
-    // isn't lost silently.
     let mut items = vec![
         json!({
             "type": 1, "name": "Site",
@@ -356,7 +355,8 @@ fn folder_note_falls_back_to_uuid_without_lookup() {
         }),
     ];
     dedup_items(&mut items);
-    let notes = items[0].get("notes").and_then(Value::as_str).unwrap_or("");
+    let survivor = living_by_dedup_group(&items);
+    let notes = survivor.get("notes").and_then(Value::as_str).unwrap_or("");
     assert!(
         notes.contains("00000000-0000-0000-0000-000000000002"),
         "dropped folder UUID must survive in notes; got {notes:?}"
@@ -386,12 +386,54 @@ fn dedup_export_reads_top_level_folders_and_dedups_items() {
         ]
     });
     let stats = dedup_export(&mut export);
-    assert_eq!(stats.output, 1);
-    assert_eq!(stats.removed, 1);
-    let items = export.get("items").and_then(Value::as_array).unwrap();
-    let notes = items[0].get("notes").and_then(Value::as_str).unwrap_or("");
+    assert_eq!(stats.output, 2, "all items stay in output");
+    assert_eq!(stats.living, 1);
+    assert_eq!(stats.trashed, 1);
+    let items = export["items"].as_array().unwrap();
+    let survivor = living_by_dedup_group(items);
+    let notes = survivor.get("notes").and_then(Value::as_str).unwrap_or("");
     assert!(
         notes.contains("Personal"),
         "dedup_export must resolve folder UUIDs via top-level folders array; got {notes:?}"
     );
 }
+
+#[test]
+fn dedup_loser_carries_deleted_date() {
+    // The non-survivor in a group MUST have `deletedDate` set so Bitwarden
+    // shows it in the Trash folder after import. The user can then visually
+    // audit what was merged and recover false positives by hand.
+    let mut items = vec![
+        json!({
+            "id": "loser", "type": 1, "name": "X",
+            "revisionDate": "2025-01-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"}
+        }),
+        json!({
+            "id": "winner", "type": 1, "name": "X",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"}
+        }),
+    ];
+    dedup_items(&mut items);
+    let winner = items
+        .iter()
+        .find(|i| i["id"].as_str() == Some("winner"))
+        .unwrap();
+    let loser = items
+        .iter()
+        .find(|i| i["id"].as_str() == Some("loser"))
+        .unwrap();
+    assert!(winner["deletedDate"].is_null(), "survivor must stay living");
+    let loser_trash = loser["deletedDate"].as_str().unwrap_or("");
+    assert!(
+        !loser_trash.is_empty(),
+        "loser must carry ISO 8601 deletedDate"
+    );
+    // Sanity-check the ISO format.
+    assert!(
+        loser_trash.contains("T") && loser_trash.ends_with("Z"),
+        "deletedDate must be ISO 8601 UTC (got {loser_trash:?})"
+    );
+}
+

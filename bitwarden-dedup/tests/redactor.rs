@@ -301,8 +301,10 @@ fn redactor_preserves_dedup_equivalence() {
 
     assert_eq!(stats.total, 3);
     assert_eq!(stats.groups, 1);
-    assert_eq!(stats.removed, 1);
-    assert_eq!(stats.output, 2);
+    assert_eq!(stats.trashed, 1);
+    // Output keeps every input item; losers are trashed, not removed.
+    assert_eq!(stats.output, 3);
+    assert_eq!(stats.living, 2);
 
     cleanup(&dir);
 }

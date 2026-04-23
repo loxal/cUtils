@@ -24,12 +24,15 @@
 //! `androidapp://` URIs where the package-name segment is case-sensitive by
 //! Android spec.
 
+mod icloud;
 mod json_util;
 mod key;
 mod merge;
 mod pipeline;
+mod time_util;
 mod uris;
 
+pub use icloud::{MergeStats, merge_icloud_csv_into_export};
 pub use key::{dedup_key, normalize_name, skip_from_dedup};
 pub use pipeline::{DedupStats, dedup_export, dedup_items};
 pub use uris::{uri_pairs, uris_to_merge};

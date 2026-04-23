@@ -429,10 +429,15 @@ fn example_fixture_counts_match_readme() {
     assert_eq!(stats.total, 22, "total items in the curated fixture");
     assert_eq!(stats.skipped, 7, "items skipped from dedup");
     assert_eq!(stats.groups, 5, "strict duplicate groups");
-    assert_eq!(stats.removed, 6, "items removed");
+    assert_eq!(stats.trashed, 6, "items routed to Bitwarden Trash by this run");
     assert_eq!(stats.merged, 3, "URIs merged into kept items");
-    assert_eq!(stats.output, 16, "surviving items");
-    assert_eq!(items.len(), 16);
+    // Output keeps every input item (losers become trashed, not removed).
+    assert_eq!(stats.output, 22);
+    assert_eq!(items.len(), 22);
+    // Fixture includes one item with `deletedDate` set at the source, so
+    // total trashed in the output = 6 (new) + 1 (pre-existing) = 7, and
+    // living items = 22 - 7 = 15.
+    assert_eq!(stats.living, 15, "living items = total - already-trashed - newly-trashed");
 }
 
 #[test]

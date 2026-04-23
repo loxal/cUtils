@@ -10,14 +10,23 @@
 //! - passkeys are never overwritten — distinct FIDO2 credentials keep items
 //!   separate even when every other field matches
 //! - when items differ only by TOTP, the group collapses to one survivor
-//!   that carries the NEWEST TOTP secret (older rotations are intentionally
-//!   dropped because they no longer authenticate against the backend)
+//!   that carries the NEWEST TOTP secret (older rotations are routed to
+//!   Bitwarden's Trash; nothing is ever removed from the output)
+//! - **nothing is ever removed** — dedup losers carry `deletedDate = now`
+//!   and stay in the output so they appear in Bitwarden's Trash folder
 //!
-//! All tests exercise the public `dedup_items` API — the behaviour they
-//! assert is part of the contract, not an implementation detail.
+//! All tests exercise the public `dedup_items` API.
 
 use bitwarden_dedup::dedup_items;
 use serde_json::{Value, json};
+
+fn living(items: &[Value]) -> Vec<&Value> {
+    items.iter().filter(|i| i["deletedDate"].is_null()).collect()
+}
+
+fn trashed(items: &[Value]) -> Vec<&Value> {
+    items.iter().filter(|i| !i["deletedDate"].is_null()).collect()
+}
 
 #[test]
 fn distinct_passwords_stay_separate() {
@@ -35,14 +44,15 @@ fn distinct_passwords_stay_separate() {
     ];
     let stats = dedup_items(&mut items);
     assert_eq!(stats.groups, 0);
-    assert_eq!(stats.removed, 0);
+    assert_eq!(stats.trashed, 0);
     assert_eq!(items.len(), 2);
+    assert_eq!(living(&items).len(), 2);
 }
 
 #[test]
 fn every_distinct_username_password_pair_survives() {
     // Same name, same notes, same everything — only (username, password)
-    // differs. Every pair must survive.
+    // differs. Every pair must survive as a living item.
     let mut items = vec![
         json!({"type": 1, "name": "Site", "notes": "n",
             "revisionDate": "2026-01-01T00:00:00Z",
@@ -58,16 +68,16 @@ fn every_distinct_username_password_pair_survives() {
             "login": {"username": "u2", "password": "p2"}}),
     ];
     let stats = dedup_items(&mut items);
-    assert_eq!(stats.removed, 0, "all four distinct (u, p) pairs must survive");
-    assert_eq!(items.len(), 4);
+    assert_eq!(stats.trashed, 0, "no pair must be trashed");
+    assert_eq!(living(&items).len(), 4);
 }
 
 #[test]
 fn divergent_totps_collapse_keeping_newest_secret() {
     // Two items identical on name/username/password but with distinct TOTP
     // secrets — the older TOTP is a rotation of the same slot on the same
-    // backend, so the group collapses to one survivor carrying the newer
-    // secret. This is the ONE field where dedup can displace a value.
+    // backend, so the group collapses to one LIVING survivor carrying the
+    // newer secret. The loser is preserved in Trash (deletedDate set).
     let mut items = vec![
         json!({"type": 1, "name": "Acme",
             "revisionDate": "2025-01-01T00:00:00Z",
@@ -79,23 +89,37 @@ fn divergent_totps_collapse_keeping_newest_secret() {
                 "totp": "otpauth://totp/Acme?secret=NEW"}}),
     ];
     let stats = dedup_items(&mut items);
-    assert_eq!(stats.removed, 1);
-    assert_eq!(items.len(), 1);
-    let secret = items[0]
+    assert_eq!(stats.trashed, 1);
+    assert_eq!(items.len(), 2, "nothing removed from array");
+    let alive = living(&items);
+    assert_eq!(alive.len(), 1);
+    let secret = alive[0]
         .get("login")
         .and_then(|l| l.get("totp"))
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
         secret.contains("NEW"),
-        "newest TOTP must win; got {secret:?}"
+        "newest TOTP must win on the living survivor; got {secret:?}"
+    );
+    // The loser is preserved in the Trash.
+    let gone = trashed(&items);
+    assert_eq!(gone.len(), 1);
+    let trashed_totp = gone[0]
+        .get("login")
+        .and_then(|l| l.get("totp"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert!(
+        trashed_totp.contains("OLD"),
+        "older TOTP is preserved in Trash (recoverable); got {trashed_totp:?}"
     );
 }
 
 #[test]
 fn totp_presence_beats_absence_in_merge() {
-    // One item carries a TOTP, the other doesn't. After merge, the survivor
-    // must carry the TOTP — absence must never overwrite presence.
+    // One item carries a TOTP, the other doesn't. After merge, the living
+    // survivor must carry the TOTP — absence must never overwrite presence.
     let mut items = vec![
         json!({"type": 1, "name": "Acme",
             "revisionDate": "2026-02-01T00:00:00Z",
@@ -106,15 +130,16 @@ fn totp_presence_beats_absence_in_merge() {
                 "totp": "otpauth://totp/Acme?secret=REAL"}}),
     ];
     dedup_items(&mut items);
-    assert_eq!(items.len(), 1, "TOTP-presence asymmetry still collapses");
-    let secret = items[0]
+    let alive = living(&items);
+    assert_eq!(alive.len(), 1, "one living survivor after collapse");
+    let secret = alive[0]
         .get("login")
         .and_then(|l| l.get("totp"))
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
         secret.contains("REAL"),
-        "the only TOTP in the group must move onto the survivor; got {secret:?}"
+        "the only TOTP in the group must move onto the living survivor; got {secret:?}"
     );
 }
 
@@ -146,10 +171,10 @@ fn distinct_passkeys_prevent_merge_even_when_credentials_match() {
         }),
     ];
     let stats = dedup_items(&mut items);
-    assert_eq!(stats.removed, 0, "distinct passkeys must never merge");
-    assert_eq!(items.len(), 2);
-    // Both passkeys still visible, on their own items.
-    let credential_ids: Vec<&str> = items
+    assert_eq!(stats.trashed, 0, "distinct passkeys must never merge");
+    assert_eq!(living(&items).len(), 2);
+    // Both passkeys still visible, on their own living items.
+    let credential_ids: Vec<&str> = living(&items)
         .iter()
         .flat_map(|i| {
             i.get("login")
@@ -170,8 +195,8 @@ fn distinct_passkeys_prevent_merge_even_when_credentials_match() {
 #[test]
 fn passkey_preserved_when_totp_merge_happens() {
     // TOTP-only-differs → merge; both items carry the SAME passkey.
-    // Survivor must retain the passkey (it's the same anyway, but the
-    // merge step must not drop it).
+    // Living survivor must retain the passkey (it's the same anyway,
+    // but the merge step must not drop it).
     let passkey = json!({"credentialId": "pk-1", "counter": "1", "userHandle": "u"});
     let mut items = vec![
         json!({
@@ -194,12 +219,45 @@ fn passkey_preserved_when_totp_merge_happens() {
         }),
     ];
     dedup_items(&mut items);
-    assert_eq!(items.len(), 1, "TOTP-only divergence should merge");
-    let passkeys = items[0]
+    let alive = living(&items);
+    assert_eq!(alive.len(), 1, "TOTP-only divergence should collapse");
+    let passkeys = alive[0]
         .get("login")
         .and_then(|l| l.get("fido2Credentials"))
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
-    assert_eq!(passkeys, 1, "passkey must survive the merge");
+    assert_eq!(passkeys, 1, "passkey must survive on living item");
+}
+
+#[test]
+fn dedup_never_removes_items_from_output() {
+    // Core invariant: no matter how aggressive the dedup, `items.len()`
+    // after dedup must equal `items.len()` before. Losers are trashed
+    // (deletedDate set), not removed.
+    let mut items = vec![
+        json!({"type": 1, "name": "X",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"}}),
+        json!({"type": 1, "name": "X",
+            "revisionDate": "2026-02-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"}}),
+        json!({"type": 1, "name": "X",
+            "revisionDate": "2026-03-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"}}),
+    ];
+    let before = items.len();
+    let stats = dedup_items(&mut items);
+    assert_eq!(items.len(), before, "dedup must never shrink the array");
+    assert_eq!(stats.output, before);
+    assert_eq!(stats.trashed, 2);
+    assert_eq!(stats.living, 1);
+    // Every trashed item has a non-null `deletedDate`.
+    for t in trashed(&items) {
+        assert!(
+            t["deletedDate"].as_str().is_some_and(|s| !s.is_empty()),
+            "trashed items must have ISO 8601 deletedDate: {}",
+            t
+        );
+    }
 }

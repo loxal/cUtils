@@ -87,7 +87,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "output": output_path.to_string_lossy(),
         "input_item_count": stats.total,
         "output_item_count": stats.output,
-        "removed_count": stats.removed,
+        "living_item_count": stats.living,
+        "trashed_count": stats.trashed,
+        // Back-compat alias — older consumers of the audit JSON look for this field.
+        "removed_count": stats.trashed,
         "duplicate_groups": stats.groups,
         "skipped_from_dedup": stats.skipped,
         "uris_merged_into_kept_total": stats.merged,
@@ -102,18 +105,25 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Groups:        {} strict duplicate groups", stats.groups);
     println!(
-        "Removed:       {} items (survivor picked by longer passwordHistory, then newer revisionDate)",
-        stats.removed
+        "Trashed:       {} items routed to Bitwarden Trash (survivor picked by longer passwordHistory, then newer revisionDate)",
+        stats.trashed
+    );
+    println!(
+        "               (trashed items stay in the output with deletedDate set — you can recover any of them from Bitwarden's Trash folder after import)"
     );
     println!(
         "URIs merged:   {} unique URLs preserved from dropped items",
         stats.merged
     );
     println!(
-        "               (notes, custom fields, and passwordHistory are also merged into survivors)"
+        "               (notes, custom fields, TOTP, passwordHistory, collections, folders — all merged into survivors)"
     );
     println!("Output:        {}", output_path.display());
-    println!("               {} items", stats.output);
+    let total_trashed_in_output = stats.output.saturating_sub(stats.living);
+    println!(
+        "               {} items ({} living, {} in Trash — includes any items that arrived pre-trashed)",
+        stats.output, stats.living, total_trashed_in_output
+    );
     println!("Audit:         {}", audit_path.display());
     println!();
     println!("Import workflow (Bitwarden web vault):");

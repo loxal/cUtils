@@ -10,11 +10,14 @@
 //! 2. For each group of size > 1, pick a survivor and compute the merged
 //!    survivor patch via [`crate::merge::build_survivor_patch`].
 //! 3. Apply patches via [`crate::merge::apply_survivor_patch`].
-//! 4. Drop the losers and assemble a [`DedupStats`] summary.
+//! 4. Mark the losers with `deletedDate = now`. They **stay in the output
+//!    array** — this is what makes them visible in Bitwarden's **Trash**
+//!    folder after import so the user can audit every merge manually and
+//!    recover anything they disagree with. No item is ever removed.
 //!
 //! **Survivor selection** is deterministic: longer `passwordHistory` wins
 //! (captures more rotation history), then newer `revisionDate`, then newer
-//! `creationDate`. That ordering is what keeps the agent-merge safe — older
+//! `creationDate`. That ordering is what keeps the merge safe — older
 //! items with richer history aren't discarded in favour of a freshly-updated
 //! stub.
 
@@ -25,29 +28,47 @@ use serde_json::{Value, json};
 use crate::json_util::get_str;
 use crate::key::{dedup_key, skip_from_dedup};
 use crate::merge::{SurvivorPatch, apply_survivor_patch, build_survivor_patch};
+use crate::time_util::iso8601_now;
 
 /// Summary of a [`dedup_items`] run.
 ///
 /// Field meanings:
-/// - `total`    — input item count before dedup
+/// - `total`    — input item count
 /// - `skipped`  — items passed through without being grouped (non-logins,
 ///                reprompt-gated, empty password, already tagged `[duplicate]`,
-///                deleted items)
+///                already-deleted items in the input)
 /// - `groups`   — number of strict duplicate groups found
-/// - `removed`  — number of items dropped (always `total - output`)
+/// - `trashed`  — number of items freshly moved to Trash by this run
+///                (dedup losers — they stay in the output array with
+///                `deletedDate = now` so Bitwarden shows them in the Trash
+///                folder after import; no item is ever removed)
 /// - `merged`   — total URIs merged from dropped items into kept items
-/// - `output`   — surviving item count after dedup
-/// - `audit_entries` — one JSON record per removed item, suitable for
+/// - `output`   — total items in the output array (always equals `total`,
+///                because dedup no longer removes anything — it only trashes)
+/// - `living`   — items in the output whose `deletedDate` is null, i.e.
+///                items the user will see in the main Bitwarden view
+/// - `audit_entries` — one JSON record per trashed item, suitable for
 ///                     writing alongside the deduplicated output
 #[derive(Debug, Clone)]
 pub struct DedupStats {
     pub total: usize,
     pub skipped: usize,
     pub groups: usize,
-    pub removed: usize,
+    pub trashed: usize,
     pub merged: usize,
     pub output: usize,
+    pub living: usize,
     pub audit_entries: Vec<Value>,
+}
+
+impl DedupStats {
+    /// Backwards-compatible alias for [`Self::trashed`].  Earlier versions
+    /// called this field `removed`, meaning "items dropped from the array";
+    /// the semantics now are "items moved to Trash", but the count is the
+    /// same so callers relying on the old name keep working.
+    pub fn removed(&self) -> usize {
+        self.trashed
+    }
 }
 
 /// Run the full dedup pipeline on a `Vec<Value>` of Bitwarden items in place.
@@ -102,9 +123,10 @@ fn empty_stats() -> DedupStats {
         total: 0,
         skipped: 0,
         groups: 0,
-        removed: 0,
+        trashed: 0,
         merged: 0,
         output: 0,
+        living: 0,
         audit_entries: Vec::new(),
     }
 }
@@ -217,23 +239,36 @@ pub(crate) fn dedup_items_with_folders(
         apply_survivor_patch(&mut items[keep_idx], patch);
     }
 
-    // Pass 4: filter out dropped items.
-    let new_items: Vec<Value> = std::mem::take(items)
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, v)| (!to_drop.contains(&i)).then_some(v))
-        .collect();
-    let output = new_items.len();
-    let removed = total - output;
-    *items = new_items;
+    // Pass 4: mark losers with `deletedDate = now`. They stay in the array
+    // so Bitwarden surfaces them in the Trash folder after import. Nothing
+    // is ever removed — the user can manually recover any false positive.
+    let now = iso8601_now();
+    for (i, item) in items.iter_mut().enumerate() {
+        if to_drop.contains(&i)
+            && let Some(obj) = item.as_object_mut()
+        {
+            obj.insert("deletedDate".to_string(), Value::String(now.clone()));
+        }
+    }
+    let trashed = to_drop.len();
+    let output = items.len();
+    let living = items
+        .iter()
+        .filter(|v| {
+            v.get("deletedDate")
+                .map(Value::is_null)
+                .unwrap_or(true)
+        })
+        .count();
 
     DedupStats {
         total,
         skipped,
         groups: dupe_groups.len(),
-        removed,
+        trashed,
         merged: total_merged,
         output,
+        living,
         audit_entries,
     }
 }
@@ -257,8 +292,9 @@ mod tests {
         let mut no_items = json!({"folders": []});
         let s = dedup_export(&mut no_items);
         assert_eq!(s.total, 0);
-        assert_eq!(s.removed, 0);
+        assert_eq!(s.trashed, 0);
         assert_eq!(s.output, 0);
+        assert_eq!(s.living, 0);
 
         let mut empty_items = json!({"folders": [], "items": []});
         let s = dedup_export(&mut empty_items);
@@ -306,16 +342,26 @@ mod tests {
             }),
         ];
         dedup_items(&mut items);
-        assert_eq!(items.len(), 1);
+        // Both items still in array; loser is trashed, survivor is living.
+        assert_eq!(items.len(), 2);
+        let living: Vec<&Value> = items.iter().filter(|i| i["deletedDate"].is_null()).collect();
+        assert_eq!(living.len(), 1);
         assert_eq!(
-            items[0].get("id").and_then(Value::as_str),
+            living[0].get("id").and_then(Value::as_str),
             Some("aaaaaaaa"),
-            "item with longer passwordHistory must be the survivor"
+            "item with longer passwordHistory must be the living survivor"
+        );
+        let trashed: Vec<&Value> = items.iter().filter(|i| !i["deletedDate"].is_null()).collect();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(
+            trashed[0].get("id").and_then(Value::as_str),
+            Some("bbbbbbbb"),
+            "loser must stay in the array with deletedDate set"
         );
     }
 
     #[test]
-    fn audit_entries_one_per_removed_item() {
+    fn audit_entries_one_per_trashed_item() {
         let mut items = vec![
             json!({
                 "id": "a", "type": 1, "name": "X",
@@ -334,7 +380,39 @@ mod tests {
             }),
         ];
         let stats = dedup_items(&mut items);
-        assert_eq!(stats.removed, 2);
+        assert_eq!(stats.trashed, 2);
         assert_eq!(stats.audit_entries.len(), 2);
+        assert_eq!(stats.living, 1, "one survivor, two trashed");
+        assert_eq!(stats.output, 3, "array still holds all three");
+    }
+
+    #[test]
+    fn already_trashed_items_pass_through_untouched() {
+        // Items that arrive with `deletedDate` set must be preserved
+        // as-is — they are the user's existing Trash.
+        let mut items = vec![
+            json!({
+                "id": "already-trash", "type": 1, "name": "Old",
+                "deletedDate": "2025-01-01T00:00:00Z",
+                "revisionDate": "2024-12-01T00:00:00Z",
+                "login": {"username": "u", "password": "p"}
+            }),
+            json!({
+                "id": "live", "type": 1, "name": "Live",
+                "revisionDate": "2026-02-01T00:00:00Z",
+                "login": {"username": "u2", "password": "p2"}
+            }),
+        ];
+        dedup_items(&mut items);
+        assert_eq!(items.len(), 2);
+        let trashed = items
+            .iter()
+            .find(|i| i["id"].as_str() == Some("already-trash"))
+            .unwrap();
+        assert_eq!(
+            trashed["deletedDate"].as_str(),
+            Some("2025-01-01T00:00:00Z"),
+            "pre-existing deletedDate must not be overwritten"
+        );
     }
 }

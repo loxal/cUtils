@@ -4,6 +4,11 @@ Rust CLI that deduplicates a Bitwarden JSON vault export into an import-ready
 file. Strict matching, URI merging, and full preservation of TOTP secrets,
 FIDO2 credentials, notes, custom fields, and password history.
 
+> **Nothing is ever removed.** Dedup losers get `deletedDate = now` set and
+> stay in the output array so Bitwarden shows them in the **Trash** folder
+> after import. You can audit every merge and recover any false positive
+> by hand — no irreversible data loss.
+
 > **100 % offline.** This tool runs entirely on your machine. It makes
 > **zero network connections** — no HTTP calls, no DNS lookups, no
 > telemetry, no update checks, no cloud APIs. Your vault data never
@@ -130,6 +135,83 @@ On Unix the deduplicated output and audit files are created with
 `0o600` (owner-only read/write), because both contain plaintext credential
 material. If a pre-existing file has looser permissions, it is chmod'd
 back to `0o600` after write.
+
+## Merging an Apple Passwords CSV export
+
+Apple's Passwords app (macOS Sequoia / iOS 18+) exports a 6-column CSV
+(`Title, URL, Username, Password, Notes, OTPAuth`). The
+`bitwarden-merge-icloud` binary merges that CSV into a Bitwarden JSON
+vault, producing `<bitwarden_stem>-with-icloud-credentials.json` with the
+same dedup rules applied across both sources.
+
+```bash
+# Auto-discover the latest bitwarden_export_*.json + newest *-Passwords.csv
+# in vault/, emit <bitwarden_stem>-with-icloud-credentials.json nearby.
+just merge-with-icloud-credentials-csv
+
+# Or specify explicit paths (bitwarden, icloud, output, audit are positional
+# but named by order — use the underlying binary for full clarity):
+cargo run --release --bin bitwarden-merge-icloud -- \
+  --bitwarden vault/bitwarden_export_20260421040622.json \
+  --icloud    vault/2026-04-23-Passwords.csv
+```
+
+### What merges
+
+Each CSV row becomes a synthetic Bitwarden item
+(`type: 1` login when it has URL/username/password/OTP; `type: 2` secure
+note if only Title+Notes). These are appended to the Bitwarden `items`
+array, then the shared dedup pipeline runs:
+
+- **Credentials** already present in Bitwarden are preserved; CSV
+  duplicates collapse and the loser is trashed (see below).
+- **URIs** union across the group — a CSV row that adds a new URL merges
+  that URL into the existing Bitwarden item.
+- **Notes** union with the usual `\n---\n` separator; raw whitespace
+  preserved on the survivor.
+- **TOTP** — newest wins by `revisionDate`. Fresh CSV imports stamp
+  `revisionDate = now`, so CSV TOTPs override older Bitwarden ones;
+  older secrets are preserved in Trash (recoverable).
+- **Passkeys / FIDO2** are part of the strict dedup key, so two items
+  with different passkey sets never collapse. Any passkey already on a
+  Bitwarden item is preserved untouched.
+- **Custom fields, passwordHistory, collectionIds, folder hints,
+  favorite flag** — all merged exactly as they are for pure-Bitwarden
+  dedup runs.
+
+### What is **not** merged
+
+Apple's CSV export does not contain the following, so this tool cannot
+transfer them — they remain in iCloud Keychain only:
+
+- **Passkeys / FIDO2** credentials — Apple does not export them to CSV.
+- **Wi-Fi passwords** — stored in a separate vault section, excluded
+  from CSV export.
+- **Sign-in-with-Apple** tokens — excluded from CSV export.
+- **Deleted (recently-removed) items** — the CSV is an active-only
+  snapshot. Apple's "Recently Deleted" list for Passwords is not part
+  of the export.
+
+The tool prints this caveat to stdout at the end of every run.
+
+### Trashing semantics (applies to both dedup and merge)
+
+Dedup never removes an item. Losers get `deletedDate = <ISO-8601 now>`
+and stay in the output array, so after you import into Bitwarden they
+appear in the **Trash** folder. If you spot a false positive, restore
+it from Trash — no data is ever lost. This applies to:
+
+- Items dropped when two Bitwarden items turn out to be duplicates.
+- Items dropped when a CSV row collapses with a Bitwarden item (either
+  the CSV copy or the existing one becomes the loser, depending on
+  `passwordHistory` length and `revisionDate`).
+- Items that arrived already trashed in the input (they pass through
+  with their original `deletedDate` intact).
+
+Audit counts for a run appear both in stdout and in
+`<bitwarden_stem>-with-icloud-credentials.audit.json`:
+`combined_trashed_count`, `combined_living_count`, `duplicate_groups`,
+`uris_merged_into_kept_total`, plus one entry per trashed item.
 
 ## Import workflow (Bitwarden web vault)
 

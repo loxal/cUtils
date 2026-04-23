@@ -45,6 +45,51 @@ dedup input='' output='' audit='':
     fi
     cargo run --release --bin bitwarden-dedup -- --input "$input" {{ if output != "" { "--output " + output } else { "" } }} {{ if audit != "" { "--audit " + audit } else { "" } }}
 
+# Merge an Apple Passwords CSV export into a Bitwarden JSON vault.
+# Without arguments: picks the newest `bitwarden_export_*.json` and the
+# newest `*-Passwords.csv` (or `Passwords*.csv`) in vault/. Writes
+# `<bitwarden_stem>-with-icloud-credentials.json` + audit next to the
+# Bitwarden input. Nothing is ever removed — dedup losers get
+# `deletedDate` set so they surface in Bitwarden's Trash folder after
+# import and can be recovered by hand.
+merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bw="{{bitwarden}}"
+    csv="{{icloud}}"
+    if [[ -z "$bw" ]]; then
+        if [[ ! -d vault ]]; then
+            echo "error: no BITWARDEN path given and vault/ directory does not exist" >&2
+            exit 1
+        fi
+        bw=$({ find vault -maxdepth 1 -type f \
+            -name 'bitwarden_export_*.json' \
+            ! -name '*.dedup.json' \
+            ! -name '*.dedup.audit.json' \
+            ! -name '*-with-icloud-credentials.json' \
+            ! -name '*-with-icloud-credentials.audit.json' \
+            2>/dev/null || true; } | sort | tail -1)
+        if [[ -z "$bw" ]]; then
+            echo "error: no bitwarden_export_*.json file in vault/" >&2
+            exit 1
+        fi
+        echo "using latest Bitwarden export: $bw" >&2
+    fi
+    if [[ -z "$csv" ]]; then
+        csv=$({ find vault -maxdepth 1 -type f \
+            \( -name '*-Passwords.csv' -o -name '*-passwords.csv' -o -name 'Passwords*.csv' \) \
+            2>/dev/null || true; } | sort | tail -1)
+        if [[ -z "$csv" ]]; then
+            echo "error: no Apple Passwords CSV in vault/ (expected e.g. '2026-04-23-Passwords.csv')" >&2
+            exit 1
+        fi
+        echo "using latest iCloud CSV:       $csv" >&2
+    fi
+    cargo run --release --bin bitwarden-merge-icloud -- \
+        --bitwarden "$bw" --icloud "$csv" \
+        {{ if output != "" { "--output " + output } else { "" } }} \
+        {{ if audit != "" { "--audit " + audit } else { "" } }}
+
 # Run the dedup tool against the committed synthetic example fixture.
 # Useful for smoke-testing a build without needing a real vault export.
 example:
