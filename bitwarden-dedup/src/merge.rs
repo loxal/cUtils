@@ -43,10 +43,30 @@ pub(crate) struct SurvivorPatch {
     /// survivor's. Prepended to notes on import so the placement hint is
     /// preserved even though Bitwarden allows only one folder per item.
     pub(crate) folder_note_line: Option<String>,
-    /// The newest non-empty TOTP across the group (by `revisionDate`), or
-    /// `None` when every item in the group has an empty/missing `login.totp`.
-    pub(crate) totp: Option<String>,
+    /// TOTP merge outcome. See [`TotpMerge`].
+    pub(crate) totp: TotpMerge,
     pub(crate) favorite: bool,
+    /// Did any drop contribute a note body to the survivor?
+    pub(crate) notes_merged: bool,
+}
+
+/// Outcome of merging TOTP across a duplicate group.
+///
+/// `conflict` is `true` when the group contained more than one distinct
+/// non-empty TOTP secret — the one place where dedup can displace
+/// user-entered credential material. The pipeline surfaces this flag in
+/// the audit so reviewers can spot-check every conflicting group.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TotpMerge {
+    /// The secret chosen for the survivor, or `None` if no item in the
+    /// group carried a non-empty TOTP.
+    pub(crate) chosen_secret: Option<String>,
+    /// The id of the item whose TOTP was chosen. `None` when no item had
+    /// a TOTP.
+    pub(crate) chosen_from_id: Option<String>,
+    /// `true` if more than one distinct non-empty TOTP was present in
+    /// the group — the non-chosen secrets move to Trash with their items.
+    pub(crate) conflict: bool,
 }
 
 pub(crate) fn build_survivor_patch(
@@ -70,7 +90,12 @@ pub(crate) fn build_survivor_patch(
     //    separator so a reader can tell they came from separate items. The
     //    raw note body is preserved — dedup keys normalize via trim, but the
     //    stored text is left byte-identical to its source.
+    let keep_note = get_str(keep, "notes").trim().to_string();
     let notes = merge_notes(keep, drops);
+    let notes_merged = match &notes {
+        Some(body) => body.trim() != keep_note,
+        None => false,
+    };
 
     // 3. URIs: adds (uri, match_mode) pairs missing on keep.
     let uri_additions = uris_to_merge(keep, drops);
@@ -99,8 +124,12 @@ pub(crate) fn build_survivor_patch(
     //    by `revisionDate`. A rotated older secret is no longer valid
     //    against the backend, so replacing it with the newer one is safe.
     //    Presence beats absence: if the survivor has no TOTP but a drop does,
-    //    that secret moves onto the survivor.
-    let totp = newest_totp_across_group(keep, drops);
+    //    that secret moves onto the survivor. See also [`TotpMerge::conflict`]
+    //    which flags groups that held more than one distinct non-empty TOTP
+    //    (the one case where dedup can displace a credential value — the
+    //    non-chosen secrets still reach the output inside their items'
+    //    Trash entries, so nothing is deleted).
+    let totp = merge_totp_across_group(keep, drops);
 
     // 9. Favorite: any item favorited → merged item favorited.
     let favorite = item_is_favorite(keep) || drops.iter().any(|d| item_is_favorite(d));
@@ -115,6 +144,7 @@ pub(crate) fn build_survivor_patch(
         folder_note_line,
         totp,
         favorite,
+        notes_merged,
     }
 }
 
@@ -196,37 +226,63 @@ pub(crate) fn apply_survivor_patch(item: &mut Value, patch: SurvivorPatch) {
             uris.extend(patch.uri_additions);
             login.insert("uris".to_string(), Value::Array(uris));
         }
-        if let Some(totp) = patch.totp {
+        if let Some(totp) = patch.totp.chosen_secret {
             login.insert("totp".to_string(), Value::String(totp));
         }
     }
 }
 
 /// Pick the newest non-empty `login.totp` across `keep` + `drops`, ranking
-/// by `revisionDate` descending. Returns `None` when every item in the
-/// group has an empty or missing TOTP.
+/// by `revisionDate` descending, and report whether the group carried more
+/// than one distinct non-empty TOTP (`conflict`).
 ///
-/// Older TOTP rotations are intentionally discarded — the backend no
-/// longer accepts them, and the single-slot shape of Bitwarden's schema
-/// means we must pick one.
-fn newest_totp_across_group(keep: &Value, drops: &[&Value]) -> Option<String> {
-    std::iter::once(keep)
-        .chain(drops.iter().copied())
-        .filter_map(|item| {
-            let totp = item
-                .get("login")
-                .and_then(|l| l.get("totp"))
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())?;
-            let rev = item
-                .get("revisionDate")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            Some((totp.to_string(), rev))
-        })
-        .max_by(|a, b| a.1.cmp(&b.1))
-        .map(|(t, _)| t)
+/// `revisionDate` is an item-level timestamp, not a TOTP-specific one, so
+/// it is an imperfect proxy for "which TOTP is current". The pipeline
+/// surfaces `conflict` in the audit so reviewers can spot-check every
+/// conflicting group; the losing secrets still reach the output inside
+/// their own items (those items are trashed, not deleted). Users who want
+/// zero-risk behavior can enable [`crate::DedupConfig::split_divergent_totps`]
+/// to keep divergent-TOTP items as separate living items.
+fn merge_totp_across_group(keep: &Value, drops: &[&Value]) -> TotpMerge {
+    let mut seen_secrets: HashSet<String> = HashSet::new();
+    let mut best: Option<(String, String, String)> = None; // (secret, rev, id)
+    for item in std::iter::once(keep).chain(drops.iter().copied()) {
+        let Some(totp) = item
+            .get("login")
+            .and_then(|l| l.get("totp"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let rev = item
+            .get("revisionDate")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        seen_secrets.insert(totp.to_string());
+        match &best {
+            None => best = Some((totp.to_string(), rev, id)),
+            Some((_, best_rev, _)) if rev > *best_rev => {
+                best = Some((totp.to_string(), rev, id));
+            }
+            _ => {}
+        }
+    }
+    let conflict = seen_secrets.len() > 1;
+    match best {
+        Some((secret, _, id)) => TotpMerge {
+            chosen_secret: Some(secret),
+            chosen_from_id: if id.is_empty() { None } else { Some(id) },
+            conflict,
+        },
+        None => TotpMerge::default(),
+    }
 }
 
 fn item_is_favorite(item: &Value) -> bool {
@@ -472,15 +528,22 @@ mod tests {
         // Survivor has an older TOTP; a drop has a newer one. The newer
         // secret must win — that's the one currently valid on the backend.
         let keep = json!({
+            "id": "keep-id",
             "revisionDate": "2025-01-01T00:00:00Z",
             "login": {"totp": "otpauth://totp/A?secret=OLD"}
         });
         let drop = json!({
+            "id": "drop-id",
             "revisionDate": "2026-01-01T00:00:00Z",
             "login": {"totp": "otpauth://totp/A?secret=NEW"}
         });
-        let picked = newest_totp_across_group(&keep, &[&drop]);
-        assert_eq!(picked.as_deref(), Some("otpauth://totp/A?secret=NEW"));
+        let picked = merge_totp_across_group(&keep, &[&drop]);
+        assert_eq!(
+            picked.chosen_secret.as_deref(),
+            Some("otpauth://totp/A?secret=NEW")
+        );
+        assert_eq!(picked.chosen_from_id.as_deref(), Some("drop-id"));
+        assert!(picked.conflict, "two distinct TOTPs = conflict");
     }
 
     #[test]
@@ -488,36 +551,83 @@ mod tests {
         // Survivor has no TOTP; a drop does. The drop's secret moves onto
         // the survivor — absence must not overwrite presence.
         let keep = json!({
+            "id": "keep-id",
             "revisionDate": "2026-02-01T00:00:00Z",
             "login": {}
         });
         let drop = json!({
+            "id": "drop-id",
             "revisionDate": "2026-01-01T00:00:00Z",
             "login": {"totp": "otpauth://totp/A?secret=ONLY"}
         });
-        let picked = newest_totp_across_group(&keep, &[&drop]);
-        assert_eq!(picked.as_deref(), Some("otpauth://totp/A?secret=ONLY"));
+        let picked = merge_totp_across_group(&keep, &[&drop]);
+        assert_eq!(
+            picked.chosen_secret.as_deref(),
+            Some("otpauth://totp/A?secret=ONLY")
+        );
+        assert_eq!(picked.chosen_from_id.as_deref(), Some("drop-id"));
+        // Only one distinct TOTP in the group — no conflict.
+        assert!(!picked.conflict);
     }
 
     #[test]
     fn newest_totp_returns_none_when_group_has_no_totp() {
         let keep = json!({"login": {}});
         let drop = json!({"login": {}});
-        assert!(newest_totp_across_group(&keep, &[&drop]).is_none());
+        let picked = merge_totp_across_group(&keep, &[&drop]);
+        assert!(picked.chosen_secret.is_none());
+        assert!(picked.chosen_from_id.is_none());
+        assert!(!picked.conflict);
     }
 
     #[test]
     fn newest_totp_ignores_empty_string_totp() {
         // Some exports carry `"totp": ""`. Treat that as missing.
         let keep = json!({
+            "id": "keep-id",
             "revisionDate": "2026-01-01T00:00:00Z",
             "login": {"totp": ""}
         });
         let drop = json!({
+            "id": "drop-id",
             "revisionDate": "2025-01-01T00:00:00Z",
             "login": {"totp": "otpauth://totp/A?secret=REAL"}
         });
-        let picked = newest_totp_across_group(&keep, &[&drop]);
-        assert_eq!(picked.as_deref(), Some("otpauth://totp/A?secret=REAL"));
+        let picked = merge_totp_across_group(&keep, &[&drop]);
+        assert_eq!(
+            picked.chosen_secret.as_deref(),
+            Some("otpauth://totp/A?secret=REAL")
+        );
+        assert_eq!(picked.chosen_from_id.as_deref(), Some("drop-id"));
+        // One empty + one real = one distinct non-empty secret, no conflict.
+        assert!(!picked.conflict);
+    }
+
+    #[test]
+    fn newest_totp_flags_conflict_when_two_non_empty_secrets_differ() {
+        let keep = json!({
+            "id": "keep-id",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"totp": "otpauth://totp/A?secret=AAA"}
+        });
+        let drop1 = json!({
+            "id": "drop-1",
+            "revisionDate": "2026-02-01T00:00:00Z",
+            "login": {"totp": "otpauth://totp/A?secret=BBB"}
+        });
+        let drop2 = json!({
+            "id": "drop-2",
+            "revisionDate": "2026-03-01T00:00:00Z",
+            "login": {"totp": "otpauth://totp/A?secret=BBB"}
+        });
+        // keep + drop1 + drop2 — two distinct non-empty secrets (AAA, BBB).
+        let picked = merge_totp_across_group(&keep, &[&drop1, &drop2]);
+        assert_eq!(
+            picked.chosen_secret.as_deref(),
+            Some("otpauth://totp/A?secret=BBB"),
+            "newest revisionDate wins"
+        );
+        assert_eq!(picked.chosen_from_id.as_deref(), Some("drop-2"));
+        assert!(picked.conflict, "AAA vs BBB must raise conflict flag");
     }
 }

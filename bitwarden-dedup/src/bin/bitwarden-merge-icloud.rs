@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use bitwarden_dedup::merge_icloud_csv_into_export;
+use bitwarden_dedup::{DedupConfig, merge_icloud_csv_into_export_with_config};
 use clap::Parser;
 use serde_json::{Value, json};
 
@@ -49,6 +49,14 @@ struct Cli {
     /// Allow path collisions (default: inputs must not match outputs).
     #[arg(long)]
     force: bool,
+
+    /// Keep items with divergent `login.totp` as separate living items
+    /// rather than collapsing them with a newest-by-`revisionDate` pick.
+    /// See `bitwarden-dedup --help` for the full rationale — this flag is
+    /// propagated to the shared dedup pipeline so it applies to both the
+    /// Bitwarden side and the merged CSV rows.
+    #[arg(long)]
+    split_divergent_totps: bool,
 }
 
 fn main() -> ExitCode {
@@ -91,7 +99,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Bitwarden export missing `items` array".into());
     }
 
-    let stats = merge_icloud_csv_into_export(&mut export, &csv_text)?;
+    let config = DedupConfig {
+        split_divergent_totps: cli.split_divergent_totps,
+    };
+    let stats = merge_icloud_csv_into_export_with_config(&mut export, &csv_text, &config)?;
 
     write_sensitive(&output_path, &serde_json::to_string_pretty(&export)?)?;
 
@@ -100,6 +111,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "bitwarden_input": bw_path.to_string_lossy(),
         "icloud_csv_input": csv_path.to_string_lossy(),
         "output": output_path.to_string_lossy(),
+        "split_divergent_totps": config.split_divergent_totps,
         "csv_rows_total": stats.csv_rows,
         "csv_rows_appended": stats.csv_items_appended,
         "csv_rows_skipped_empty": stats.csv_rows_skipped,
@@ -108,6 +120,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "combined_living_count": dedup.living,
         "combined_trashed_count": dedup.trashed,
         "duplicate_groups": dedup.groups,
+        "totp_conflict_groups": dedup.totp_conflict_groups,
         "skipped_from_dedup": dedup.skipped,
         "uris_merged_into_kept_total": dedup.merged,
         "entries": dedup.audit_entries.clone(),
@@ -125,6 +138,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "Groups:          {} strict duplicate groups across Bitwarden + iCloud",
         dedup.groups
     );
+    if dedup.totp_conflict_groups > 0 {
+        println!(
+            "TOTP conflicts:  {} group(s) carried >1 distinct non-empty TOTP (audit entries: totp_conflict=true; rerun with --split-divergent-totps to keep them separate)",
+            dedup.totp_conflict_groups
+        );
+    }
     println!(
         "Trashed:         {} items routed to Bitwarden Trash by this run (CSV + Bitwarden duplicates; deletedDate set — recoverable after import)",
         dedup.trashed
@@ -177,11 +196,31 @@ fn suffix_sibling(input: &Path, suffix: &str) -> PathBuf {
     parent.join(format!("{stem}{suffix}"))
 }
 
+/// Resolve a path to a canonical identity for collision detection.
+/// Mirrors the helper in `src/main.rs`: canonicalize existing paths,
+/// canonicalize parent + file name for non-existent outputs, and fall
+/// back to `std::path::absolute` only if even the parent is missing.
+fn canonical_identity(p: &Path) -> Result<PathBuf, String> {
+    if let Ok(resolved) = fs::canonicalize(p) {
+        return Ok(resolved);
+    }
+    if let (Some(parent), Some(name)) = (p.parent(), p.file_name())
+        && let Ok(parent_canon) = fs::canonicalize(if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        })
+    {
+        return Ok(parent_canon.join(name));
+    }
+    std::path::absolute(p).map_err(|e| format!("resolving {}: {e}", p.display()))
+}
+
 fn check_paths_distinct(paths: &[&Path], force: bool) -> Result<(), String> {
-    let abs = |p: &Path| -> Result<PathBuf, String> {
-        std::path::absolute(p).map_err(|e| format!("resolving {}: {e}", p.display()))
-    };
-    let resolved: Vec<PathBuf> = paths.iter().map(|p| abs(p)).collect::<Result<_, _>>()?;
+    let resolved: Vec<PathBuf> = paths
+        .iter()
+        .map(|p| canonical_identity(p))
+        .collect::<Result<_, _>>()?;
     let mut collisions: Vec<String> = Vec::new();
     for i in 0..resolved.len() {
         for j in i + 1..resolved.len() {

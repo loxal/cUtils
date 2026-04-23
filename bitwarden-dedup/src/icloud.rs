@@ -37,7 +37,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-use crate::pipeline::{DedupStats, dedup_export};
+use crate::pipeline::{DedupConfig, DedupStats, dedup_export_with_config};
 use crate::time_util::iso8601_from_epoch_secs;
 
 /// Summary of an iCloud-CSV merge run.
@@ -54,13 +54,25 @@ pub struct MergeStats {
 }
 
 /// Parse an Apple Passwords CSV, map each row to a Bitwarden item, append
-/// the items to the existing `items` array, and run the dedup pipeline.
+/// the items to the existing `items` array, and run the dedup pipeline
+/// with the default [`DedupConfig`].
 ///
 /// The combined vault is written back into `export` in place; the caller
 /// serializes the result.
 pub fn merge_icloud_csv_into_export(
     export: &mut Value,
     csv_text: &str,
+) -> Result<MergeStats, String> {
+    merge_icloud_csv_into_export_with_config(export, csv_text, &DedupConfig::default())
+}
+
+/// Same as [`merge_icloud_csv_into_export`] but with an explicit
+/// [`DedupConfig`]. Use this entry point to thread CLI flags like
+/// `--split-divergent-totps` into the shared pipeline.
+pub fn merge_icloud_csv_into_export_with_config(
+    export: &mut Value,
+    csv_text: &str,
+    config: &DedupConfig,
 ) -> Result<MergeStats, String> {
     let rows = parse_apple_passwords_csv(csv_text)?;
     let csv_rows_total = rows.len();
@@ -98,7 +110,7 @@ pub fn merge_icloud_csv_into_export(
 
     // Run dedup over the combined set — overlap with existing Bitwarden
     // items collapses, new items pass through untouched.
-    let dedup_stats = dedup_export(export);
+    let dedup_stats = dedup_export_with_config(export, config);
 
     Ok(MergeStats {
         csv_rows: csv_rows_total,

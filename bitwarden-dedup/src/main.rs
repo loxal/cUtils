@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use bitwarden_dedup::dedup_export;
+use bitwarden_dedup::{DedupConfig, dedup_export_with_config};
 use clap::Parser;
 use serde_json::{Value, json};
 
@@ -39,6 +39,16 @@ struct Cli {
     /// audit JSON from clobbering the deduplicated output.
     #[arg(long)]
     force: bool,
+
+    /// Keep items with divergent `login.totp` as separate living items
+    /// instead of collapsing them and picking the newest secret for the
+    /// survivor. `revisionDate` is an item-level timestamp — editing notes
+    /// or favouriting an item with an old TOTP can make it "look newer"
+    /// than an item carrying the current secret. Use this flag when you
+    /// would rather keep the duplicates living than risk the wrong TOTP
+    /// landing on the survivor. Losers stay in Trash regardless.
+    #[arg(long)]
+    split_divergent_totps: bool,
 }
 
 fn main() -> ExitCode {
@@ -78,13 +88,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `dedup_export` reads the top-level `folders` array so the folder
     // disambiguation note on merged items uses human-readable folder names
     // instead of opaque UUIDs.
-    let stats = dedup_export(&mut data);
+    let config = DedupConfig {
+        split_divergent_totps: cli.split_divergent_totps,
+    };
+    let stats = dedup_export_with_config(&mut data, &config);
 
     write_sensitive(&output_path, &serde_json::to_string_pretty(&data)?)?;
 
     let audit_doc = json!({
         "input": input_path.to_string_lossy(),
         "output": output_path.to_string_lossy(),
+        "split_divergent_totps": config.split_divergent_totps,
         "input_item_count": stats.total,
         "output_item_count": stats.output,
         "living_item_count": stats.living,
@@ -92,6 +106,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // Back-compat alias — older consumers of the audit JSON look for this field.
         "removed_count": stats.trashed,
         "duplicate_groups": stats.groups,
+        "totp_conflict_groups": stats.totp_conflict_groups,
         "skipped_from_dedup": stats.skipped,
         "uris_merged_into_kept_total": stats.merged,
         "entries": stats.audit_entries,
@@ -104,6 +119,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         stats.total, stats.skipped
     );
     println!("Groups:        {} strict duplicate groups", stats.groups);
+    if stats.totp_conflict_groups > 0 {
+        println!(
+            "TOTP conflicts:{} group(s) carried >1 distinct non-empty TOTP (audit entries: totp_conflict=true; rerun with --split-divergent-totps to keep them separate)",
+            stats.totp_conflict_groups
+        );
+    }
     println!(
         "Trashed:       {} items routed to Bitwarden Trash (survivor picked by longer passwordHistory, then newer revisionDate)",
         stats.trashed
@@ -150,18 +171,40 @@ fn sibling(input: &Path, suffix: &str) -> PathBuf {
     parent.join(format!("{stem}{suffix}"))
 }
 
+/// Resolve a path to a canonical identity for collision detection.
+///
+/// - Existing paths are canonicalized via [`fs::canonicalize`] so symlinks,
+///   `.`, and `..` components collapse to the real inode path.
+/// - For paths that don't exist yet (typical for `--output` / `--audit`),
+///   canonicalize the parent directory and append the file name — that
+///   way a symlinked parent still trips the duplicate check.
+/// - As a last resort (no parent either), fall back to
+///   [`std::path::absolute`] so we still return a comparable value.
+fn canonical_identity(p: &Path) -> Result<PathBuf, String> {
+    if let Ok(resolved) = fs::canonicalize(p) {
+        return Ok(resolved);
+    }
+    if let (Some(parent), Some(name)) = (p.parent(), p.file_name())
+        && let Ok(parent_canon) = fs::canonicalize(if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        })
+    {
+        return Ok(parent_canon.join(name));
+    }
+    std::path::absolute(p).map_err(|e| format!("resolving {}: {e}", p.display()))
+}
+
 fn check_paths_distinct(
     input: &Path,
     output: &Path,
     audit: &Path,
     force: bool,
 ) -> Result<(), String> {
-    let abs = |p: &Path| -> Result<PathBuf, String> {
-        std::path::absolute(p).map_err(|e| format!("resolving {}: {e}", p.display()))
-    };
-    let input_abs = abs(input)?;
-    let output_abs = abs(output)?;
-    let audit_abs = abs(audit)?;
+    let input_abs = canonical_identity(input)?;
+    let output_abs = canonical_identity(output)?;
+    let audit_abs = canonical_identity(audit)?;
 
     let mut collisions: Vec<String> = Vec::new();
     if output_abs == input_abs {

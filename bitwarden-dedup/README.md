@@ -89,7 +89,7 @@ survivor so nothing the user typed is lost.
 
 | Field | Merge rule |
 |---|---|
-| `login.totp` | single-slot in Bitwarden; the **newest** non-empty TOTP across the group wins (by `revisionDate`). Older rotations are intentionally dropped — they no longer authenticate against the backend. Presence beats absence: a survivor without a TOTP inherits any drop's. This is the only field dedup can displace |
+| `login.totp` | single-slot in Bitwarden; the **newest** non-empty TOTP across the group wins (by `revisionDate`). Older rotations are intentionally dropped — they no longer authenticate against the backend. Presence beats absence: a survivor without a TOTP inherits any drop's. This is the only field dedup can displace — see the [TOTP caveat](#a-note-on-the-totp-heuristic) below |
 | `notes` | union of distinct non-empty bodies joined by `\n---\n`; dedup key is the trimmed body, but the **raw** text (including surrounding whitespace) is preserved in the output |
 | `fields` (custom fields) | union by `(name, value, type, linkedId)` tuple — `linkedId` is the Bitwarden integer that identifies a Linked field's target (`100` = Username, `101` = Password, confirmed from live API) |
 | `passwordHistory` | union by `(lastUsedDate, password)`, sorted newest-first after merge |
@@ -113,6 +113,39 @@ Items that are **never** grouped (passed through unchanged):
 - items with an empty password (would spuriously group on `""`)
 - items whose name already contains `[duplicate]`
 - deleted items (trash)
+
+### A note on the TOTP heuristic
+
+`revisionDate` is the **item-level** last-modified timestamp — Bitwarden
+touches it when you edit notes, toggle the favorite flag, add a URL,
+etc. It is *not* a TOTP-specific timestamp. So the "newest TOTP wins"
+rule can in principle put the wrong live secret on the survivor when an
+item carrying an older TOTP had some other field edited recently.
+
+Mitigations already baked in:
+
+- Losers are **trashed, not deleted** — every TOTP still reaches the
+  output inside its original item, in Bitwarden's Trash folder.
+- The audit file surfaces every affected group. Each entry carries
+  `totp_conflict` (bool), `totp_kept_from_id` (which item contributed
+  the survivor's TOTP), and `removed_totp_present` (did the trashed
+  item carry its own TOTP). A top-level `totp_conflict_groups` count
+  also appears.
+
+If you would rather not auto-collapse any group whose TOTPs diverge,
+pass `--split-divergent-totps`. With the flag set, items that differ
+only in `login.totp` stay as separate living items; you can reconcile
+them by hand. The flag is propagated to both `bitwarden-dedup` and
+`bitwarden-merge-icloud`.
+
+### A note on the note-body heuristic
+
+Note merging deduplicates by the **trimmed** body (`raw.trim()`), but
+stores the survivor's **raw** text byte-for-byte. That means two notes
+differing only by surrounding whitespace collapse to a single preserved
+variant — acceptable for all vaults we've seen, but it does erase
+formatting-only distinctions if you deliberately use surrounding
+whitespace inside notes.
 
 ## Advanced usage
 
@@ -211,7 +244,13 @@ it from Trash — no data is ever lost. This applies to:
 Audit counts for a run appear both in stdout and in
 `<bitwarden_stem>-with-icloud-credentials.audit.json`:
 `combined_trashed_count`, `combined_living_count`, `duplicate_groups`,
-`uris_merged_into_kept_total`, plus one entry per trashed item.
+`totp_conflict_groups`, `uris_merged_into_kept_total`, plus one entry per
+trashed item with per-group merge-sensitivity flags (`totp_conflict`,
+`totp_kept_from_id`, `notes_merged`, `fields_merged`, `collections_merged`,
+`folder_note_added`, `removed_totp_present`). Grep the audit for
+`"totp_conflict": true` to review every group where dedup had to pick
+between multiple TOTPs — or rerun with `--split-divergent-totps` to
+skip such collapses altogether.
 
 ## Import workflow (Bitwarden web vault)
 

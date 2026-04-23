@@ -17,7 +17,7 @@
 //!
 //! All tests exercise the public `dedup_items` API.
 
-use bitwarden_dedup::dedup_items;
+use bitwarden_dedup::{DedupConfig, dedup_items, dedup_items_with_config};
 use serde_json::{Value, json};
 
 fn living(items: &[Value]) -> Vec<&Value> {
@@ -228,6 +228,45 @@ fn passkey_preserved_when_totp_merge_happens() {
         .map(Vec::len)
         .unwrap_or(0);
     assert_eq!(passkeys, 1, "passkey must survive on living item");
+}
+
+#[test]
+fn split_divergent_totps_opt_in_keeps_items_separate() {
+    // Opt-in safety net: when the caller sets `split_divergent_totps`, two
+    // items identical on every key field except `login.totp` do not
+    // collapse. This protects against a mis-aimed revisionDate heuristic
+    // putting the wrong live secret on the survivor when the user knows
+    // their vault has been edited unevenly.
+    let mut items = vec![
+        json!({"type": 1, "name": "Acme",
+            "revisionDate": "2026-02-01T00:00:00Z",
+            "login": {"username": "u", "password": "p",
+                "totp": "otpauth://totp/A?secret=OLD-BUT-LOOKS-NEWER"}}),
+        json!({"type": 1, "name": "Acme",
+            "revisionDate": "2025-01-01T00:00:00Z",
+            "login": {"username": "u", "password": "p",
+                "totp": "otpauth://totp/A?secret=CURRENT"}}),
+    ];
+    let stats = dedup_items_with_config(
+        &mut items,
+        &DedupConfig {
+            split_divergent_totps: true,
+        },
+    );
+    assert_eq!(stats.trashed, 0, "divergent TOTPs must stay separate under opt-in");
+    assert_eq!(living(&items).len(), 2);
+    // Every TOTP is reachable on a living item — nothing is at risk of
+    // being overwritten by a wrong survivor pick.
+    let secrets: Vec<&str> = living(&items)
+        .iter()
+        .filter_map(|i| {
+            i.get("login")
+                .and_then(|l| l.get("totp"))
+                .and_then(Value::as_str)
+        })
+        .collect();
+    assert!(secrets.iter().any(|s| s.contains("OLD-BUT-LOOKS-NEWER")));
+    assert!(secrets.iter().any(|s| s.contains("CURRENT")));
 }
 
 #[test]

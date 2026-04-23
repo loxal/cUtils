@@ -32,7 +32,12 @@ mod pipeline;
 mod time_util;
 mod uris;
 
-pub use icloud::{MergeStats, merge_icloud_csv_into_export};
+pub use icloud::{
+    MergeStats, merge_icloud_csv_into_export, merge_icloud_csv_into_export_with_config,
+};
 pub use key::{dedup_key, normalize_name, skip_from_dedup};
-pub use pipeline::{DedupStats, dedup_export, dedup_items};
+pub use pipeline::{
+    DedupConfig, DedupStats, dedup_export, dedup_export_with_config, dedup_items,
+    dedup_items_with_config,
+};
 pub use uris::{uri_pairs, uris_to_merge};

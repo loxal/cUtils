@@ -30,6 +30,25 @@ use crate::key::{dedup_key, skip_from_dedup};
 use crate::merge::{SurvivorPatch, apply_survivor_patch, build_survivor_patch};
 use crate::time_util::iso8601_now;
 
+/// Configuration knobs for a dedup run. Defaults match the documented
+/// merge semantics; callers only set fields they want to diverge from.
+#[derive(Debug, Clone, Default)]
+pub struct DedupConfig {
+    /// When `true`, items that differ only in `login.totp` stay as
+    /// separate living items instead of collapsing with the
+    /// newest-by-`revisionDate` pick.
+    ///
+    /// `revisionDate` is an item-level timestamp (touched by edits to
+    /// notes, favorite flag, etc.), so it is an imperfect proxy for
+    /// "which TOTP is currently valid on the backend". The default
+    /// behavior (`false`) collapses the group and keeps the newest
+    /// secret — the non-chosen TOTPs still reach the output inside
+    /// their items' Trash entries, so they are recoverable. Set this
+    /// to `true` if you would rather keep the duplicates than risk
+    /// having the wrong live secret on the living survivor.
+    pub split_divergent_totps: bool,
+}
+
 /// Summary of a [`dedup_items`] run.
 ///
 /// Field meanings:
@@ -43,6 +62,10 @@ use crate::time_util::iso8601_now;
 ///                `deletedDate = now` so Bitwarden shows them in the Trash
 ///                folder after import; no item is ever removed)
 /// - `merged`   — total URIs merged from dropped items into kept items
+/// - `totp_conflict_groups` — groups that contained more than one distinct
+///                non-empty TOTP (the sensitive case reviewers should
+///                spot-check; every per-entry audit record carries a
+///                `totp_conflict` flag for the same groups)
 /// - `output`   — total items in the output array (always equals `total`,
 ///                because dedup no longer removes anything — it only trashes)
 /// - `living`   — items in the output whose `deletedDate` is null, i.e.
@@ -56,6 +79,7 @@ pub struct DedupStats {
     pub groups: usize,
     pub trashed: usize,
     pub merged: usize,
+    pub totp_conflict_groups: usize,
     pub output: usize,
     pub living: usize,
     pub audit_entries: Vec<Value>,
@@ -68,6 +92,20 @@ impl DedupStats {
     /// same so callers relying on the old name keep working.
     pub fn removed(&self) -> usize {
         self.trashed
+    }
+}
+
+fn empty_stats_full() -> DedupStats {
+    DedupStats {
+        total: 0,
+        skipped: 0,
+        groups: 0,
+        trashed: 0,
+        merged: 0,
+        totp_conflict_groups: 0,
+        output: 0,
+        living: 0,
+        audit_entries: Vec::new(),
     }
 }
 
@@ -94,7 +132,12 @@ impl DedupStats {
 /// disambiguation note. This entry point passes an empty lookup, so
 /// divergent folders fall back to bare UUIDs in the merged notes.
 pub fn dedup_items(items: &mut Vec<Value>) -> DedupStats {
-    dedup_items_with_folders(items, &HashMap::new())
+    dedup_items_with_folders(items, &HashMap::new(), &DedupConfig::default())
+}
+
+/// Same as [`dedup_items`] but with an explicit [`DedupConfig`].
+pub fn dedup_items_with_config(items: &mut Vec<Value>, config: &DedupConfig) -> DedupStats {
+    dedup_items_with_folders(items, &HashMap::new(), config)
 }
 
 /// Run the full dedup pipeline on a complete Bitwarden export JSON value.
@@ -105,30 +148,22 @@ pub fn dedup_items(items: &mut Vec<Value>) -> DedupStats {
 /// [`dedup_items`]. When the export has no `folders` array, behaves
 /// identically to [`dedup_items`].
 pub fn dedup_export(export: &mut Value) -> DedupStats {
-    let folders = extract_folder_names(export);
-    let Some(items_value) = export.get_mut("items") else {
-        return empty_stats();
-    };
-    let Some(arr) = items_value.as_array_mut() else {
-        return empty_stats();
-    };
-    let mut items = std::mem::take(arr);
-    let stats = dedup_items_with_folders(&mut items, &folders);
-    *arr = items;
-    stats
+    dedup_export_with_config(export, &DedupConfig::default())
 }
 
-fn empty_stats() -> DedupStats {
-    DedupStats {
-        total: 0,
-        skipped: 0,
-        groups: 0,
-        trashed: 0,
-        merged: 0,
-        output: 0,
-        living: 0,
-        audit_entries: Vec::new(),
-    }
+/// Same as [`dedup_export`] but with an explicit [`DedupConfig`].
+pub fn dedup_export_with_config(export: &mut Value, config: &DedupConfig) -> DedupStats {
+    let folders = extract_folder_names(export);
+    let Some(items_value) = export.get_mut("items") else {
+        return empty_stats_full();
+    };
+    let Some(arr) = items_value.as_array_mut() else {
+        return empty_stats_full();
+    };
+    let mut items = std::mem::take(arr);
+    let stats = dedup_items_with_folders(&mut items, &folders, config);
+    *arr = items;
+    stats
 }
 
 fn extract_folder_names(export: &Value) -> HashMap<String, String> {
@@ -152,14 +187,17 @@ fn extract_folder_names(export: &Value) -> HashMap<String, String> {
 
 /// Core of the pipeline. Exposed `pub(crate)` so inline tests here can drive
 /// it with an explicit folders map; the public API is [`dedup_items`] /
-/// [`dedup_export`].
+/// [`dedup_export`] / [`dedup_items_with_config`] / [`dedup_export_with_config`].
 pub(crate) fn dedup_items_with_folders(
     items: &mut Vec<Value>,
     folders: &HashMap<String, String>,
+    config: &DedupConfig,
 ) -> DedupStats {
     let total = items.len();
 
-    // Pass 1: group by dedup key.
+    // Pass 1: group by dedup key. When `split_divergent_totps` is set,
+    // append the item's TOTP to the group key so items with different
+    // TOTPs never share a group — they stay as separate living items.
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     let mut skipped = 0usize;
     for (idx, item) in items.iter().enumerate() {
@@ -167,7 +205,18 @@ pub(crate) fn dedup_items_with_folders(
             skipped += 1;
             continue;
         }
-        groups.entry(dedup_key(item)).or_default().push(idx);
+        let base_key = dedup_key(item);
+        let key = if config.split_divergent_totps {
+            let totp = item
+                .get("login")
+                .and_then(|l| l.get("totp"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            format!("{base_key}\0totp={totp}")
+        } else {
+            base_key
+        };
+        groups.entry(key).or_default().push(idx);
     }
 
     let mut dupe_groups: Vec<Vec<usize>> = groups
@@ -181,6 +230,7 @@ pub(crate) fn dedup_items_with_folders(
     let mut audit_entries: Vec<Value> = Vec::new();
     let mut survivor_patches: Vec<(usize, SurvivorPatch)> = Vec::new();
     let mut total_merged = 0usize;
+    let mut totp_conflict_groups = 0usize;
 
     for group in &dupe_groups {
         let mut ordered = group.clone();
@@ -205,11 +255,25 @@ pub(crate) fn dedup_items_with_folders(
         let patch = build_survivor_patch(keep, &drops, folders);
         let merged_here = patch.uri_additions.len();
         total_merged += merged_here;
+        if patch.totp.conflict {
+            totp_conflict_groups += 1;
+        }
 
         let keep_id = keep.get("id").cloned().unwrap_or(Value::Null);
         let keep_rev = keep.get("revisionDate").cloned().unwrap_or(Value::Null);
         let keep_folder = keep.get("folderId").cloned().unwrap_or(Value::Null);
         let keep_name_for_audit = Value::String(patch.longest_name.clone());
+        let totp_conflict = patch.totp.conflict;
+        let totp_kept_from_id = patch
+            .totp
+            .chosen_from_id
+            .as_ref()
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null);
+        let fields_merged_count = patch.field_additions.len();
+        let collections_merged_count = patch.collection_additions.len();
+        let folder_note_added = patch.folder_note_line.is_some();
+        let notes_merged_flag = patch.notes_merged;
 
         for &di in drop_idxs {
             to_drop.insert(di);
@@ -223,11 +287,22 @@ pub(crate) fn dedup_items_with_folders(
                 "removed_revisionDate": dropped.get("revisionDate").cloned().unwrap_or(Value::Null),
                 "removed_creationDate": dropped.get("creationDate").cloned().unwrap_or(Value::Null),
                 "removed_folderId": dropped.get("folderId").cloned().unwrap_or(Value::Null),
+                "removed_totp_present": dropped
+                    .get("login").and_then(|l| l.get("totp"))
+                    .and_then(Value::as_str)
+                    .map(|s| !s.is_empty()).unwrap_or(false),
                 "kept_id": keep_id.clone(),
                 "kept_name": keep_name_for_audit.clone(),
                 "kept_revisionDate": keep_rev.clone(),
                 "kept_folderId": keep_folder.clone(),
                 "uris_merged_into_kept": merged_here,
+                // Merge-sensitivity flags — let reviewers grep risky cases.
+                "totp_conflict": totp_conflict,
+                "totp_kept_from_id": totp_kept_from_id.clone(),
+                "notes_merged": notes_merged_flag,
+                "fields_merged": fields_merged_count,
+                "collections_merged": collections_merged_count,
+                "folder_note_added": folder_note_added,
             }));
         }
 
@@ -267,6 +342,7 @@ pub(crate) fn dedup_items_with_folders(
         groups: dupe_groups.len(),
         trashed,
         merged: total_merged,
+        totp_conflict_groups,
         output,
         living,
         audit_entries,
@@ -384,6 +460,106 @@ mod tests {
         assert_eq!(stats.audit_entries.len(), 2);
         assert_eq!(stats.living, 1, "one survivor, two trashed");
         assert_eq!(stats.output, 3, "array still holds all three");
+    }
+
+    #[test]
+    fn split_divergent_totps_keeps_items_separate() {
+        // With the opt-in flag set, two items identical on name/user/pw but
+        // differing only in TOTP stay as separate living items instead of
+        // collapsing. This protects against a bad revisionDate heuristic
+        // picking the wrong secret for the survivor.
+        let mut items = vec![
+            json!({
+                "id": "with-old", "type": 1, "name": "Acme",
+                "revisionDate": "2026-02-01T00:00:00Z",
+                "login": {"username": "u", "password": "p",
+                    "totp": "otpauth://totp/A?secret=OLD"}
+            }),
+            json!({
+                "id": "with-new", "type": 1, "name": "Acme",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "login": {"username": "u", "password": "p",
+                    "totp": "otpauth://totp/A?secret=NEW"}
+            }),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                split_divergent_totps: true,
+            },
+        );
+        assert_eq!(stats.trashed, 0, "divergent TOTPs must not collapse");
+        assert_eq!(stats.groups, 0);
+        assert_eq!(
+            items.iter().filter(|i| i["deletedDate"].is_null()).count(),
+            2,
+            "both items stay living"
+        );
+    }
+
+    #[test]
+    fn divergent_totp_group_collapses_by_default_with_conflict_flag() {
+        // Default config: the group collapses and the survivor gets the
+        // newest TOTP by revisionDate. But `totp_conflict` is surfaced on
+        // every audit entry for the group so reviewers can find it.
+        let mut items = vec![
+            json!({
+                "id": "older", "type": 1, "name": "Acme",
+                "revisionDate": "2025-01-01T00:00:00Z",
+                "login": {"username": "u", "password": "p",
+                    "totp": "otpauth://totp/A?secret=OLD"}
+            }),
+            json!({
+                "id": "newer", "type": 1, "name": "Acme",
+                "revisionDate": "2026-06-01T00:00:00Z",
+                "login": {"username": "u", "password": "p",
+                    "totp": "otpauth://totp/A?secret=NEW"}
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.groups, 1);
+        assert_eq!(stats.trashed, 1);
+        assert_eq!(stats.totp_conflict_groups, 1);
+        assert_eq!(stats.audit_entries.len(), 1);
+        let entry = &stats.audit_entries[0];
+        assert_eq!(entry["totp_conflict"], true);
+        assert_eq!(entry["totp_kept_from_id"], "newer");
+        assert_eq!(entry["removed_totp_present"], true);
+    }
+
+    #[test]
+    fn audit_entry_has_merge_sensitivity_flags() {
+        // When a merge pulls in a distinct note / custom field / collection
+        // from a drop, the audit entry for that drop records it so a reviewer
+        // can spot which groups had non-trivial merges.
+        let mut items = vec![
+            json!({
+                "id": "keep", "type": 1, "name": "X",
+                "organizationId": "org-1",
+                "collectionIds": ["c-A"],
+                "notes": "note-from-keep",
+                "revisionDate": "2026-02-01T00:00:00Z",
+                "login": {"username": "u", "password": "p"}
+            }),
+            json!({
+                "id": "drop", "type": 1, "name": "X",
+                "organizationId": "org-1",
+                "collectionIds": ["c-B"],
+                "notes": "note-from-drop",
+                "fields": [{"name": "q", "value": "r", "type": 0}],
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "login": {"username": "u", "password": "p"}
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.audit_entries.len(), 1);
+        let entry = &stats.audit_entries[0];
+        assert_eq!(entry["removed_id"], "drop");
+        assert_eq!(entry["notes_merged"], true);
+        assert_eq!(entry["fields_merged"], 1);
+        assert_eq!(entry["collections_merged"], 1);
+        assert_eq!(entry["folder_note_added"], false);
+        assert_eq!(entry["totp_conflict"], false);
     }
 
     #[test]
