@@ -426,6 +426,63 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_non_apple_header() {
+        // A non-Apple CSV (e.g. someone points the tool at a 1Password
+        // export or a wrong file entirely) must fail loud rather than
+        // silently return empty synthetic items.
+        let csv = "Name,Website,Login,Secret\n\
+                   GitHub,https://github.com,alex,pw\n";
+        let err = parse_apple_passwords_csv(csv).unwrap_err();
+        assert!(
+            err.contains("missing required column"),
+            "error must name the missing columns; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_header_missing_single_required_column() {
+        // Even a single missing column (e.g. no OTPAuth) is a hard fail —
+        // the tool's contract is "six Apple columns", not "some subset".
+        let csv = "Title,URL,Username,Password,Notes\n\
+                   GitHub,https://github.com,alex,pw,a note\n";
+        let err = parse_apple_passwords_csv(csv).unwrap_err();
+        assert!(err.contains("otpauth"), "error must name the missing column; got {err:?}");
+    }
+
+    #[test]
+    fn parse_accepts_extra_unknown_columns() {
+        // Forward compat: Apple may add columns in a future release. Extra
+        // unknown columns beyond the six required ones are accepted.
+        let csv = "Title,URL,Username,Password,Notes,OTPAuth,FutureField\n\
+                   X,https://x.test,u,p,,,ignore-me\n";
+        let rows = parse_apple_passwords_csv(csv).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].url, "https://x.test");
+    }
+
+    #[test]
+    fn parse_rejects_unterminated_quote() {
+        // A truncated CSV that leaves a quote open is almost certainly
+        // corrupted — refuse rather than silently flushing the field.
+        let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
+                   GitHub,,alex,pw,\"unterminated note without closing quote,\n";
+        let err = parse_apple_passwords_csv(csv).unwrap_err();
+        assert!(
+            err.contains("quote") || err.contains("malformed"),
+            "error must mention malformed quoting; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_empty_file() {
+        let err = parse_apple_passwords_csv("").unwrap_err();
+        assert!(
+            err.to_lowercase().contains("empty"),
+            "error must mention empty CSV; got {err:?}"
+        );
+    }
+
+    #[test]
     fn parse_crlf_line_endings() {
         let csv = "Title,URL,Username,Password,Notes,OTPAuth\r\nX,,,p,,\r\n";
         let rows = parse_apple_passwords_csv(csv).unwrap();
@@ -663,5 +720,51 @@ mod tests {
         assert_eq!(stats.csv_rows, 0);
         assert_eq!(stats.csv_items_appended, 0);
         assert_eq!(export["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_refuses_to_overwrite_non_array_items() {
+        // If `items` exists but is not an array, the file is almost
+        // certainly damaged or not actually a Bitwarden export. Silently
+        // replacing its `items` with a fresh array would mask the real
+        // problem — refuse instead.
+        let mut export = json!({
+            "folders": [],
+            "items": "oops-not-an-array"
+        });
+        let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
+                   GitHub,https://github.com,u,p,,\n";
+        let err = merge_icloud_csv_into_export(&mut export, csv).unwrap_err();
+        assert!(
+            err.contains("not an array"),
+            "error must explain why we refused; got {err:?}"
+        );
+        // Original structure must be untouched on error.
+        assert_eq!(export["items"].as_str(), Some("oops-not-an-array"));
+    }
+
+    #[test]
+    fn merge_bootstraps_items_when_absent() {
+        // An export that carries only `folders` (no `items` field at all)
+        // is a valid scaffold — the merge path inserts a fresh array.
+        let mut export = json!({"folders": []});
+        let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
+                   X,https://x.test,u,p,,\n";
+        let stats = merge_icloud_csv_into_export(&mut export, csv).unwrap();
+        assert_eq!(stats.csv_items_appended, 1);
+        assert_eq!(export["items"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_surfaces_csv_parse_errors() {
+        // When the CSV parser rejects the file, the merge entry point
+        // must propagate the error — no silent best-effort pass-through.
+        let mut export = json!({"folders": [], "items": []});
+        // Wrong headers entirely.
+        let err = merge_icloud_csv_into_export(&mut export, "A,B,C\n1,2,3\n").unwrap_err();
+        assert!(
+            err.contains("missing required column"),
+            "CSV validation error must bubble up; got {err:?}"
+        );
     }
 }

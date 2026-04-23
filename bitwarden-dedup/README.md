@@ -136,7 +136,13 @@ If you would rather not auto-collapse any group whose TOTPs diverge,
 pass `--split-divergent-totps`. With the flag set, items that differ
 only in `login.totp` stay as separate living items; you can reconcile
 them by hand. The flag is propagated to both `bitwarden-dedup` and
-`bitwarden-merge-icloud`.
+`bitwarden-merge-icloud`, and both `just` recipes expose the safer
+mode without dropping to raw `cargo run`:
+
+```bash
+just dedup-split-totps                             # plain dedup
+just merge-with-icloud-credentials-csv-split-totps # iCloud merge
+```
 
 ### A note on the note-body heuristic
 
@@ -182,12 +188,36 @@ same dedup rules applied across both sources.
 # in vault/, emit <bitwarden_stem>-with-icloud-credentials.json nearby.
 just merge-with-icloud-credentials-csv
 
+# Same as above but with the safer --split-divergent-totps mode: items that
+# differ only in login.totp stay as separate living items instead of auto-
+# collapsing by revisionDate. See "A note on the TOTP heuristic" above.
+just merge-with-icloud-credentials-csv-split-totps
+
 # Or specify explicit paths (bitwarden, icloud, output, audit are positional
 # but named by order — use the underlying binary for full clarity):
 cargo run --release --bin bitwarden-merge-icloud -- \
   --bitwarden vault/bitwarden_export_20260421040622.json \
   --icloud    vault/2026-04-23-Passwords.csv
 ```
+
+### Fail-fast validation
+
+The iCloud merge path feeds straight into a purge-and-reimport, so the
+tool rejects obviously wrong inputs loudly rather than best-efforting
+them through:
+
+- **Wrong CSV header** — missing any of the six Apple columns (`Title`,
+  `URL`, `Username`, `Password`, `Notes`, `OTPAuth`) aborts before
+  anything is written. Extra unknown columns are still accepted for
+  forward-compat with future Apple releases.
+- **Malformed CSV quoting** — an export that ends inside a quoted field
+  is refused (unterminated quote = almost certainly truncated file).
+- **Non-array `items`** — if the Bitwarden JSON carries an `items` field
+  that is not an array, the tool refuses to silently overwrite it.
+  Missing `items` entirely is allowed (bootstraps a fresh array).
+- **Atomic writes** — output and audit files land via a same-directory
+  temp file + `rename()`, so an interrupted write never leaves a
+  partially-populated file at the destination path.
 
 ### What merges
 
