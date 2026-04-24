@@ -289,6 +289,178 @@ fn item_is_favorite(item: &Value) -> bool {
     item.get("favorite").and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// Everything the pipeline needs to apply to a surviving **secure note**
+/// (`type: 2`) after its duplicate group has been picked.
+///
+/// Secure notes group under a strict key that includes the trimmed
+/// `notes` body (see [`crate::key::secure_note_key`]), so by the time
+/// we get here every item in the group shares the same notes body. The
+/// survivor therefore keeps its own body untouched; this patch only
+/// carries the subset of survivor-merge data that remains meaningful:
+/// longest name, favorite OR, field/collection unions, and a folder
+/// disambiguation note if any drop sat in a different folder.
+pub(crate) struct SecureNotePatch {
+    pub(crate) longest_name: String,
+    pub(crate) field_additions: Vec<Value>,
+    pub(crate) collection_additions: Vec<String>,
+    pub(crate) folder_note_line: Option<String>,
+    pub(crate) favorite: bool,
+}
+
+pub(crate) fn build_secure_note_patch(
+    keep: &Value,
+    drops: &[&Value],
+    folders: &HashMap<String, String>,
+) -> SecureNotePatch {
+    let keep_name = get_str(keep, "name").to_string();
+    let mut longest_name = keep_name.clone();
+    for d in drops {
+        let dn = get_str(d, "name");
+        if dn.chars().count() > longest_name.chars().count() {
+            longest_name = dn.to_string();
+        }
+    }
+
+    SecureNotePatch {
+        longest_name,
+        field_additions: fields_to_merge(keep, drops),
+        collection_additions: collections_to_merge(keep, drops),
+        folder_note_line: folder_disambiguation_note(keep, drops, folders),
+        favorite: item_is_favorite(keep) || drops.iter().any(|d| item_is_favorite(d)),
+    }
+}
+
+pub(crate) fn apply_secure_note_patch(item: &mut Value, patch: SecureNotePatch) {
+    // Folder-disambiguation line (if any) is prepended to the existing
+    // notes body so the placement hint survives after import.
+    let keep_body = get_str(item, "notes").to_string();
+    let final_notes = match patch.folder_note_line.as_deref() {
+        Some(line) if !keep_body.is_empty() => Some(format!("{line}\n{keep_body}")),
+        Some(line) => Some(line.to_string()),
+        None => None,
+    };
+
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+    obj.insert("name".to_string(), Value::String(patch.longest_name));
+    if let Some(merged) = final_notes {
+        obj.insert("notes".to_string(), Value::String(merged));
+    }
+    obj.insert("favorite".to_string(), Value::Bool(patch.favorite));
+    if !patch.field_additions.is_empty() {
+        let mut fields = obj
+            .get("fields")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        fields.extend(patch.field_additions);
+        obj.insert("fields".to_string(), Value::Array(fields));
+    }
+    if !patch.collection_additions.is_empty() {
+        let mut cols: Vec<Value> = obj
+            .get("collectionIds")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for id in patch.collection_additions {
+            cols.push(Value::String(id));
+        }
+        obj.insert("collectionIds".to_string(), Value::Array(cols));
+    }
+}
+
+/// Origin label for a secure note (Bitwarden native vs iCloud CSV
+/// synthetic). Surfaced in the audit so reviewers can tell which
+/// side each dropped note came from.
+pub(crate) fn secure_note_source_label(item: &Value) -> &'static str {
+    match item.get("id").and_then(Value::as_str) {
+        Some(id) if id.starts_with("apple-csv-") => "iCloud Passwords",
+        _ => "Bitwarden",
+    }
+}
+
+/// Everything the pipeline needs to apply to a surviving SSH key
+/// (`type: 5`) after its duplicate group has been picked.
+///
+/// SSH keys group under a strict key that includes the full `sshKey`
+/// object ([`crate::key::ssh_key_key`]), so by the time we get here
+/// every item in the group shares the exact same key material —
+/// public key, private key, fingerprint. The survivor keeps its own
+/// `sshKey` block untouched; this patch only carries the subset of
+/// survivor-merge data that remains meaningful for an SSH key:
+/// longest name, favorite OR, field/collection unions, folder
+/// disambiguation note.
+pub(crate) struct SshKeyPatch {
+    pub(crate) longest_name: String,
+    pub(crate) field_additions: Vec<Value>,
+    pub(crate) collection_additions: Vec<String>,
+    pub(crate) folder_note_line: Option<String>,
+    pub(crate) favorite: bool,
+}
+
+pub(crate) fn build_ssh_key_patch(
+    keep: &Value,
+    drops: &[&Value],
+    folders: &HashMap<String, String>,
+) -> SshKeyPatch {
+    let keep_name = get_str(keep, "name").to_string();
+    let mut longest_name = keep_name.clone();
+    for d in drops {
+        let dn = get_str(d, "name");
+        if dn.chars().count() > longest_name.chars().count() {
+            longest_name = dn.to_string();
+        }
+    }
+    SshKeyPatch {
+        longest_name,
+        field_additions: fields_to_merge(keep, drops),
+        collection_additions: collections_to_merge(keep, drops),
+        folder_note_line: folder_disambiguation_note(keep, drops, folders),
+        favorite: item_is_favorite(keep) || drops.iter().any(|d| item_is_favorite(d)),
+    }
+}
+
+pub(crate) fn apply_ssh_key_patch(item: &mut Value, patch: SshKeyPatch) {
+    // Folder-disambiguation line (if any) lands on `notes`; SSH key
+    // material itself is never touched.
+    let keep_notes = get_str(item, "notes").to_string();
+    let final_notes = match patch.folder_note_line.as_deref() {
+        Some(line) if !keep_notes.is_empty() => Some(format!("{line}\n{keep_notes}")),
+        Some(line) => Some(line.to_string()),
+        None => None,
+    };
+
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+    obj.insert("name".to_string(), Value::String(patch.longest_name));
+    if let Some(merged) = final_notes {
+        obj.insert("notes".to_string(), Value::String(merged));
+    }
+    obj.insert("favorite".to_string(), Value::Bool(patch.favorite));
+    if !patch.field_additions.is_empty() {
+        let mut fields = obj
+            .get("fields")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        fields.extend(patch.field_additions);
+        obj.insert("fields".to_string(), Value::Array(fields));
+    }
+    if !patch.collection_additions.is_empty() {
+        let mut cols: Vec<Value> = obj
+            .get("collectionIds")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for id in patch.collection_additions {
+            cols.push(Value::String(id));
+        }
+        obj.insert("collectionIds".to_string(), Value::Array(cols));
+    }
+}
+
 /// Merge notes from `keep` and `drops` into a single string.
 ///
 /// Uses the trimmed note body as the dedup key, but stores the **raw**

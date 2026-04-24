@@ -122,8 +122,9 @@ pub fn merge_icloud_csv_into_export_with_config(
     let csv_items_appended = new_items.len();
 
     // Run dedup over the combined set — overlap with existing Bitwarden
-    // items collapses, new items pass through untouched.
-    let dedup_stats = dedup_export_with_config(export, config);
+    // items collapses, new items pass through untouched. Unwraps `?`
+    // because we already validated the export shape above.
+    let dedup_stats = dedup_export_with_config(export, config)?;
 
     Ok(MergeStats {
         csv_rows: csv_rows_total,
@@ -706,12 +707,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_leaves_standalone_bitwarden_secure_notes_untouched() {
-        // A Bitwarden secure note (`type: 2`) carrying a recovery-code
-        // body that happens to look similar to a CSV row's content must
-        // stay byte-identical after merge — secure notes never enter
-        // the dedup grouping step.
-        let secure_note = json!({
+    fn merge_collapses_secure_notes_only_when_bodies_match() {
+        // Strict secure-note key requires same NAME, same organizationId,
+        // AND same trimmed body. Two notes sharing a name but with
+        // different bodies stay as separate living items — the CSV row
+        // "some other wallet notes" does NOT overwrite or collapse with
+        // the Bitwarden seed phrase.
+        let bw_note = json!({
             "id": "bw-note",
             "type": 2,
             "name": "Wallet seed phrase",
@@ -724,31 +726,96 @@ mod tests {
         });
         let mut export = json!({
             "folders": [],
-            "items": [secure_note.clone()]
+            "items": [bw_note.clone()]
         });
-        // CSV row with a Title+Notes that vaguely resembles the seed
-        // phrase body. It becomes its own synthetic secure note — it
-        // must not cross-contaminate the Bitwarden one.
         let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
                    \"Wallet seed phrase\",,,,\"some other wallet notes\",\n";
         merge_icloud_csv_into_export(&mut export, csv).unwrap();
         let items = export["items"].as_array().unwrap();
+        // BW note preserved byte-identical (no collapse → no mutation).
         let survivor = items
             .iter()
             .find(|i| i["id"].as_str() == Some("bw-note"))
             .expect("Bitwarden secure note must still be in output");
+        assert_eq!(*survivor, bw_note,
+            "different bodies must leave the BW note untouched");
+        // CSV row landed as its own living item.
+        let csv_item = items
+            .iter()
+            .find(|i| i["id"].as_str().unwrap_or("").starts_with("apple-csv-"))
+            .expect("CSV secure note must be in output");
+        assert!(csv_item["deletedDate"].is_null(),
+            "CSV note must stay living since its body differs from the BW note");
+    }
+
+    #[test]
+    fn merge_collapses_literal_duplicate_secure_notes() {
+        // Same NAME + same BODY + same org → literal duplicate. Collapses
+        // under the strict key. Bitwarden-origin wins as survivor; CSV
+        // copy is trashed (recoverable from Bitwarden's Trash).
+        let bw_note = json!({
+            "id": "bw-note",
+            "type": 2,
+            "name": "WiFi router password",
+            "notes": "SSID: Home\nPassword: correct horse battery staple",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        });
+        let mut export = json!({
+            "folders": [],
+            "items": [bw_note]
+        });
+        // Embed the newline directly in the quoted CSV field so the
+        // parser sees the same body the Bitwarden item carries.
+        let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
+                   \"WiFi router password\",,,,\"SSID: Home\nPassword: correct horse battery staple\",\n";
+        merge_icloud_csv_into_export(&mut export, csv).unwrap();
+        let items = export["items"].as_array().unwrap();
+        let living_notes: Vec<&Value> = items
+            .iter()
+            .filter(|i| i["type"] == 2 && i["deletedDate"].is_null())
+            .collect();
+        assert_eq!(living_notes.len(), 1, "literal duplicates must collapse");
         assert_eq!(
-            *survivor, secure_note,
-            "existing Bitwarden secure note must be preserved byte-identical"
+            living_notes[0]["id"].as_str(),
+            Some("bw-note"),
+            "Bitwarden-origin item must be the survivor"
         );
-        // And the CSV-derived secure note is added as a fresh item.
         assert!(
-            items.iter().any(|i| {
-                i["type"] == 2
-                    && i["notes"].as_str() == Some("some other wallet notes")
-                    && i["deletedDate"].is_null()
-            }),
-            "CSV note-only row must be added as a fresh living secure note"
+            items.iter().any(|i| i["type"] == 2
+                && i["id"].as_str().unwrap_or("").starts_with("apple-csv-")
+                && !i["deletedDate"].is_null()),
+            "CSV copy must be preserved in Trash"
+        );
+    }
+
+    #[test]
+    fn merge_leaves_unique_secure_notes_untouched() {
+        // A Bitwarden secure note with a name that DOES NOT match any
+        // CSV row stays completely untouched — no dedup partner exists.
+        let unique_note = json!({
+            "id": "bw-only",
+            "type": 2,
+            "name": "Unique recovery codes never in iCloud",
+            "notes": "alpha beta gamma delta",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        });
+        let mut export = json!({
+            "folders": [],
+            "items": [unique_note.clone()]
+        });
+        let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
+                   \"Some unrelated site\",https://x.test,u,p,,\n";
+        merge_icloud_csv_into_export(&mut export, csv).unwrap();
+        let items = export["items"].as_array().unwrap();
+        let survivor = items
+            .iter()
+            .find(|i| i["id"].as_str() == Some("bw-only"))
+            .expect("unique BW secure note must still be in output");
+        assert_eq!(
+            *survivor, unique_note,
+            "a unique-named secure note must stay byte-identical"
         );
     }
 

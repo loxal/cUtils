@@ -70,35 +70,62 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let audit_path = cli
         .audit
         .unwrap_or_else(|| sibling(&input_path, ".dedup.audit.json"));
+    // Compute the trash-sidecar path up front so it participates in
+    // the path-safety check — a custom --output or --audit equal to
+    // the default sidecar path would otherwise race us at write time
+    // and clobber the recovery copy.
+    let trashed_path = sibling(&input_path, ".dedup.trashed.json");
 
-    // Path safety: input, output, and audit must resolve to distinct
-    // absolute paths unless --force is set. Without this check, an
-    // unfortunate --output or --audit override could overwrite the only
-    // backup of the export or clobber the dedup output with the audit file.
-    check_paths_distinct(&input_path, &output_path, &audit_path, cli.force)?;
+    // Path safety: input, output, audit, and the derived trash
+    // sidecar must all resolve to distinct absolute paths unless
+    // --force is set. Without this check an unfortunate override
+    // could overwrite the only backup of the export or clobber one
+    // recovery artifact with another.
+    check_paths_distinct(
+        &input_path,
+        &output_path,
+        &audit_path,
+        &trashed_path,
+        cli.force,
+    )?;
 
     let text = fs::read_to_string(&input_path)
         .map_err(|e| format!("reading {}: {e}", input_path.display()))?;
     let mut data: Value = serde_json::from_str(&text)
         .map_err(|e| format!("parsing {}: {e}", input_path.display()))?;
 
-    if data.get("items").and_then(Value::as_array).is_none() {
-        return Err("missing 'items' array in export".into());
-    }
-
-    // `dedup_export` reads the top-level `folders` array so the folder
-    // disambiguation note on merged items uses human-readable folder names
-    // instead of opaque UUIDs.
+    // `dedup_export_with_config` fails loud when the top-level object is
+    // malformed (missing `items`, or `items` present but not an array)
+    // so an operator who points the tool at the wrong file sees a clear
+    // error instead of a plausible-looking no-op output.
     let config = DedupConfig {
         split_divergent_totps: cli.split_divergent_totps,
     };
-    let stats = dedup_export_with_config(&mut data, &config);
+    let stats = dedup_export_with_config(&mut data, &config)?;
+
+    // Split dedup output into living vs trashed. Bitwarden's JSON
+    // importer handles `deletedDate` inconsistently across client
+    // versions, so the safest shape for a clean re-import is to move
+    // all trashed items out of the main `items` array and write them
+    // to a sidecar file (same Bitwarden-JSON shape, importable
+    // separately if desired). If this run produces zero trashed
+    // items, `split_items_to_sidecar` deletes any stale sidecar left
+    // from a previous run so the operator never imports a misleading
+    // outdated recovery file.
+    let trashed_count = split_items_to_sidecar(&mut data, &trashed_path)?;
 
     write_sensitive_atomic(&output_path, &serde_json::to_string_pretty(&data)?)?;
 
+    let trashed_sidecar = if trashed_count > 0 {
+        Value::String(trashed_path.to_string_lossy().into_owned())
+    } else {
+        Value::Null
+    };
     let audit_doc = json!({
         "input": input_path.to_string_lossy(),
         "output": output_path.to_string_lossy(),
+        "trashed_sidecar": trashed_sidecar,
+        "trashed_sidecar_item_count": trashed_count,
         "split_divergent_totps": config.split_divergent_totps,
         "input_item_count": stats.total,
         "output_item_count": stats.output,
@@ -108,6 +135,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "removed_count": stats.trashed,
         "duplicate_groups": stats.groups,
         "totp_conflict_groups": stats.totp_conflict_groups,
+        "folders_deduplicated": stats.folders_deduplicated,
         "skipped_from_dedup": stats.skipped,
         "uris_merged_into_kept_total": stats.merged,
         "entries": stats.audit_entries,
@@ -120,18 +148,36 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         stats.total, stats.skipped
     );
     println!("Groups:        {} strict duplicate groups", stats.groups);
-    if stats.totp_conflict_groups > 0 {
+    if stats.folders_deduplicated > 0 {
         println!(
-            "TOTP conflicts:{} group(s) carried >1 distinct non-empty TOTP (audit entries: totp_conflict=true; rerun with --split-divergent-totps to keep them separate)",
-            stats.totp_conflict_groups
+            "Folders:       {} duplicate folder(s) collapsed; every item's folderId remapped to the surviving folder.",
+            stats.folders_deduplicated
         );
     }
+    if stats.totp_conflict_groups > 0 {
+        println!();
+        println!(
+            "!! TOTP CONFLICT: {} group(s) had >1 distinct non-empty TOTP. The",
+            stats.totp_conflict_groups
+        );
+        println!(
+            "   newest-by-revisionDate secret is on the survivor; the older ones"
+        );
+        println!(
+            "   are in Trash. If you do NOT trust that heuristic for this vault,"
+        );
+        println!(
+            "   rerun `just dedup-split-totps` (or pass --split-divergent-totps)"
+        );
+        println!(
+            "   to keep divergent-TOTP items as separate living entries. Audit"
+        );
+        println!("   records for each group carry `totp_conflict: true`.");
+        println!();
+    }
     println!(
-        "Trashed:       {} items routed to Bitwarden Trash (survivor picked by longer passwordHistory, then newer revisionDate)",
+        "Trashed:       {} items routed out of the active `items` array (survivor picked by longer passwordHistory, then newer revisionDate)",
         stats.trashed
-    );
-    println!(
-        "               (trashed items stay in the output with deletedDate set — you can recover any of them from Bitwarden's Trash folder after import)"
     );
     println!(
         "URIs merged:   {} unique URLs preserved from dropped items",
@@ -141,19 +187,41 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "               (notes, custom fields, TOTP, passwordHistory, collections, folders — all merged into survivors)"
     );
     println!("Output:        {}", output_path.display());
-    let total_trashed_in_output = stats.output.saturating_sub(stats.living);
     println!(
-        "               {} items ({} living, {} in Trash — includes any items that arrived pre-trashed)",
-        stats.output, stats.living, total_trashed_in_output
+        "               {} items — all living (clean import into Bitwarden's active vault)",
+        stats.living
     );
+    if trashed_count > 0 {
+        println!("Trash sidecar: {}", trashed_path.display());
+        println!(
+            "               {} items carrying `deletedDate` (dedup losers plus anything pre-trashed in the input).",
+            trashed_count
+        );
+        println!(
+            "               NOT auto-imported — kept out of the main `items` array so Bitwarden's active view stays clean."
+        );
+        println!(
+            "               Import this sidecar separately if you want to populate Bitwarden's Trash folder."
+        );
+    }
     println!("Audit:         {}", audit_path.display());
     println!();
-    println!("Import workflow (Bitwarden web vault):");
-    println!("  1. Back up your current vault (keep the original export file)");
     println!(
-        "  2. Settings -> My Account -> Purge Vault (Bitwarden import never \
-         dedupes — if you skip Purge, every item imports a second time)"
+        "!! IMPORT WORKFLOW — follow every step or you WILL see duplicates !!"
     );
+    println!(
+        "   Bitwarden's Import is purely ADDITIVE: it never dedupes against"
+    );
+    println!(
+        "   your existing vault. Skip the Purge step and every item already"
+    );
+    println!(
+        "   in your vault appears twice."
+    );
+    println!();
+    println!("  1. Back up your current vault (keep the original export file).");
+    println!("  2. Settings -> My Account -> Purge Vault.");
+    println!("     (This empties your vault. It is load-bearing.)");
     println!(
         "  3. Tools -> Import Data -> Bitwarden (json) -> select {}",
         output_path
@@ -161,7 +229,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default()
             .to_string_lossy()
     );
-    println!("  4. Verify TOTP codes generate correctly on a few critical items");
+    println!("  4. Verify TOTP codes generate correctly on a few critical items.");
 
     Ok(())
 }
@@ -170,6 +238,61 @@ fn sibling(input: &Path, suffix: &str) -> PathBuf {
     let parent = input.parent().unwrap_or(Path::new("."));
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     parent.join(format!("{stem}{suffix}"))
+}
+
+/// Move items carrying a non-null `deletedDate` out of `data.items`
+/// into a sibling JSON file with the same top-level shape. Returns
+/// the count written.
+///
+/// Keeping trashed items out of the main `items` array is the only
+/// way to guarantee Bitwarden's active view is clean after import,
+/// regardless of how the target Bitwarden client version handles
+/// `deletedDate` on JSON import.
+fn split_items_to_sidecar(data: &mut Value, trashed_path: &Path) -> Result<usize, String> {
+    let Some(obj) = data.as_object_mut() else {
+        return Err("export is not a top-level JSON object".into());
+    };
+    let Some(Value::Array(arr)) = obj.get_mut("items") else {
+        return Err("export `items` field is not an array after dedup".into());
+    };
+    let all = std::mem::take(arr);
+    let mut living = Vec::with_capacity(all.len());
+    let mut trashed = Vec::new();
+    for item in all {
+        let is_trashed = item
+            .get("deletedDate")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        if is_trashed {
+            trashed.push(item);
+        } else {
+            living.push(item);
+        }
+    }
+    let trashed_count = trashed.len();
+    *arr = living;
+
+    if trashed_count > 0 {
+        let mut trashed_export = data.clone();
+        if let Some(obj) = trashed_export.as_object_mut() {
+            obj.insert("items".to_string(), Value::Array(trashed));
+        }
+        let json = serde_json::to_string_pretty(&trashed_export)
+            .map_err(|e| format!("serializing trashed sidecar: {e}"))?;
+        write_sensitive_atomic(trashed_path, &json)
+            .map_err(|e| format!("writing {}: {e}", trashed_path.display()))?;
+    } else {
+        // No losers this run — delete any stale sidecar from a previous
+        // run at the same path. Keeping it would leave a misleading
+        // recovery file next to a fresh clean output, which is exactly
+        // the kind of thing an operator imports by mistake.
+        if trashed_path.exists() {
+            fs::remove_file(trashed_path).map_err(|e| {
+                format!("removing stale trash sidecar {}: {e}", trashed_path.display())
+            })?;
+        }
+    }
+    Ok(trashed_count)
 }
 
 /// Resolve a path to a canonical identity for collision detection.
@@ -201,30 +324,32 @@ fn check_paths_distinct(
     input: &Path,
     output: &Path,
     audit: &Path,
+    trashed: &Path,
     force: bool,
 ) -> Result<(), String> {
-    let input_abs = canonical_identity(input)?;
-    let output_abs = canonical_identity(output)?;
-    let audit_abs = canonical_identity(audit)?;
+    let labelled: [(&str, &Path); 4] = [
+        ("--input", input),
+        ("--output", output),
+        ("--audit", audit),
+        ("trash sidecar", trashed),
+    ];
+    let resolved: Vec<(String, PathBuf)> = labelled
+        .iter()
+        .map(|(label, p)| Ok(((*label).to_string(), canonical_identity(p)?)))
+        .collect::<Result<_, String>>()?;
 
     let mut collisions: Vec<String> = Vec::new();
-    if output_abs == input_abs {
-        collisions.push(format!(
-            "--output ({}) would overwrite --input",
-            output.display()
-        ));
-    }
-    if audit_abs == input_abs {
-        collisions.push(format!(
-            "--audit ({}) would overwrite --input",
-            audit.display()
-        ));
-    }
-    if output_abs == audit_abs {
-        collisions.push(format!(
-            "--output and --audit resolve to the same path ({})",
-            output.display()
-        ));
+    for i in 0..resolved.len() {
+        for j in i + 1..resolved.len() {
+            if resolved[i].1 == resolved[j].1 {
+                collisions.push(format!(
+                    "{} and {} resolve to the same path ({})",
+                    resolved[i].0,
+                    resolved[j].0,
+                    resolved[i].1.display()
+                ));
+            }
+        }
     }
 
     if collisions.is_empty() {
@@ -260,6 +385,7 @@ mod tests {
             Path::new("/tmp/vault.json"),
             Path::new("/tmp/vault.json"),
             Path::new("/tmp/audit.json"),
+            Path::new("/tmp/trashed.json"),
             false,
         );
         assert!(r.is_err());
@@ -271,6 +397,7 @@ mod tests {
             Path::new("/tmp/vault.json"),
             Path::new("/tmp/out.json"),
             Path::new("/tmp/vault.json"),
+            Path::new("/tmp/trashed.json"),
             false,
         );
         assert!(r.is_err());
@@ -282,9 +409,49 @@ mod tests {
             Path::new("/tmp/vault.json"),
             Path::new("/tmp/same.json"),
             Path::new("/tmp/same.json"),
+            Path::new("/tmp/trashed.json"),
             false,
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn path_safety_rejects_trashed_equals_output() {
+        // Regression guard: a custom --output equal to the default
+        // sidecar path (or vice versa) would race at write time and
+        // clobber the recovery copy. The safety check must catch it.
+        let r = check_paths_distinct(
+            Path::new("/tmp/vault.json"),
+            Path::new("/tmp/same.json"),
+            Path::new("/tmp/audit.json"),
+            Path::new("/tmp/same.json"),
+            false,
+        );
+        assert!(r.is_err(), "trash-sidecar vs --output collision must be caught");
+    }
+
+    #[test]
+    fn path_safety_rejects_trashed_equals_input() {
+        let r = check_paths_distinct(
+            Path::new("/tmp/vault.json"),
+            Path::new("/tmp/out.json"),
+            Path::new("/tmp/audit.json"),
+            Path::new("/tmp/vault.json"),
+            false,
+        );
+        assert!(r.is_err(), "trash sidecar must not overwrite --input");
+    }
+
+    #[test]
+    fn path_safety_rejects_trashed_equals_audit() {
+        let r = check_paths_distinct(
+            Path::new("/tmp/vault.json"),
+            Path::new("/tmp/out.json"),
+            Path::new("/tmp/same.json"),
+            Path::new("/tmp/same.json"),
+            false,
+        );
+        assert!(r.is_err(), "trash sidecar must not collide with --audit");
     }
 
     #[test]
@@ -293,6 +460,7 @@ mod tests {
             Path::new("/tmp/vault.json"),
             Path::new("/tmp/out.json"),
             Path::new("/tmp/audit.json"),
+            Path::new("/tmp/trashed.json"),
             false,
         );
         assert!(r.is_ok());
@@ -304,6 +472,7 @@ mod tests {
             Path::new("/tmp/vault.json"),
             Path::new("/tmp/vault.json"),
             Path::new("/tmp/audit.json"),
+            Path::new("/tmp/trashed.json"),
             true,
         );
         assert!(r.is_ok());
@@ -316,6 +485,7 @@ mod tests {
             Path::new("/tmp/./vault.json"),
             Path::new("/tmp/vault.json"),
             Path::new("/tmp/audit.json"),
+            Path::new("/tmp/trashed.json"),
             false,
         );
         assert!(r.is_err(), "path safety should collapse '.' segments");

@@ -4,10 +4,14 @@ Rust CLI that deduplicates a Bitwarden JSON vault export into an import-ready
 file. Strict matching, URI merging, and full preservation of TOTP secrets,
 FIDO2 credentials, notes, custom fields, and password history.
 
-> **Nothing is ever removed.** Dedup losers get `deletedDate = now` set and
-> stay in the output array so Bitwarden shows them in the **Trash** folder
-> after import. You can audit every merge and recover any false positive
-> by hand — no irreversible data loss.
+> **Nothing is ever removed.** Dedup losers get `deletedDate = now` set
+> and are split into a **sidecar file** (`*.dedup.trashed.json` /
+> `*-with-icloud-credentials.trashed.json`) — same Bitwarden-JSON
+> shape, not auto-imported. The main output file contains **only
+> living items** so Bitwarden's active view stays clean after import
+> regardless of how the target client version handles `deletedDate`.
+> The sidecar is your offline recovery copy; import it separately
+> only if you want to populate Bitwarden's Trash folder.
 
 > **100 % offline.** This tool runs entirely on your machine. It makes
 > **zero network connections** — no HTTP calls, no DNS lookups, no
@@ -53,9 +57,20 @@ if you have multiple exports, the newest one wins). The output and
 audit files are written next to the input:
 
 - `vault/bitwarden_export_<ts>.dedup.json` — the deduplicated,
-  import-ready file
+  import-ready file (LIVING items only, `deletedDate: null` on every
+  entry — ready to import cleanly into Bitwarden's active vault)
+- `vault/bitwarden_export_<ts>.dedup.trashed.json` — dedup losers and
+  any items that arrived pre-trashed, in the same Bitwarden-JSON
+  shape; NOT auto-imported, kept as an offline recovery copy
 - `vault/bitwarden_export_<ts>.dedup.audit.json` — per-removal record
   (ids, names, dates — no passwords or TOTP seeds)
+
+> **Merging an Apple Passwords CSV at the same time?** Skip `just dedup`
+> and run `just merge-with-icloud-credentials-csv` instead. The merge
+> recipe runs the full dedup pipeline internally on the combined
+> (Bitwarden + iCloud) set, so it deduplicates the Bitwarden side for
+> you in one pass. See [Merging an Apple Passwords CSV
+> export](#merging-an-apple-passwords-csv-export).
 
 **Step 4 — Import the cleaned file back into Bitwarden.**
 
@@ -107,17 +122,91 @@ survivor so nothing the user typed is lost.
 
 Items that are **never** grouped (passed through byte-identical):
 
-- **non-login types** — **Secure Notes (`type: 2`)**, cards (`type: 3`),
-  identities (`type: 4`), SSH keys (`type: 5`). They sidestep the dedup
-  grouping step entirely, so every field the user typed (notes body,
-  custom fields, favorite flag, folder placement) lands in the output
-  exactly as it came in. Two Secure Notes with identical bodies are
-  kept as two separate items — we don't guess at note identity.
+- **Cards (`type: 3`)** and **identities (`type: 4`)** — no obvious
+  structured equality we'd trust for dedup, so they bypass the
+  pipeline entirely.
 - items with `reprompt == 1` (master-password gated — too sensitive to
   auto-merge)
 - items with an empty password (would spuriously group on `""`)
 - items whose name already contains `[duplicate]`
 - already-trashed items (their `deletedDate` is preserved as-is)
+
+### SSH keys (`type: 5`) dedup
+
+SSH keys dedup in their own pass under a strict key: two `type: 5`
+items only collapse when they carry **exactly the same** `sshKey`
+object — public key, private key, and fingerprint are all part of the
+grouping key, plus the organization id. Any byte-level mismatch in the
+key material keeps items separate (a public-key collision with
+divergent private halves is almost certainly vault corruption, not a
+merge candidate).
+
+Survivor selection is the simplest possible: newer `revisionDate`,
+then newer `creationDate`. The surviving SSH key's key material is
+never modified — only name (longest raw name wins), favorite (OR),
+custom-field union, collection-id union, and folder-disambiguation
+note get merged.
+
+### Folder dedup
+
+The top-level `folders` array gets its own small dedup pass before
+item dedup runs. Two folders with the same normalized name (case-fold
++ trim + invisible-character scrub — see [Secure Notes
+dedup](#secure-notes-type-2-dedup) for the normalization rule set)
+collapse to one survivor per name; every item's `folderId` is then
+remapped to the surviving folder's id so references stay valid after
+import. The survivor per group is the folder that appears first in
+input order — Bitwarden exports don't carry a `revisionDate` on
+folders, so there is no better tiebreak.
+
+Most useful when an earlier additive import left your export with
+multiple copies of the same folder (e.g. two `main` folders). The
+audit JSON reports `folders_deduplicated` so you can grep for runs
+that collapsed any folders.
+
+### Secure Notes (`type: 2`) dedup
+
+Secure notes also dedup, but under a **deliberately strict key** — name
+alone is too aggressive for notes (generic titles like `Recovery`,
+`Wallet`, `API keys`, `credentials.txt` are common), so the key
+includes the trimmed body and the organization id. Only literal
+duplicates collapse; semantically distinct items that happen to share
+a name stay as separate living items.
+
+- **Grouping key**: `(normalize_note_name(name), organizationId,
+  canonicalize_note_body(notes))`.
+  - `normalize_note_name` folds case, trims Unicode whitespace, and
+    strips invisible / default-ignorable characters (ZWSP, ZWNJ,
+    BOM, soft hyphen, bidi overrides, …). It **intentionally does
+    NOT** strip `(email@…)` suffixes the way login-name
+    normalization does — for a note title, that suffix can be
+    meaningful content.
+  - `organizationId` keeps personal and org-owned notes in separate
+    groups — different vaults, different access control.
+  - `canonicalize_note_body` applies the same invisible-character
+    scrubbing plus Unicode-aware outer-trim. Different bodies mean
+    different notes.
+- **Survivor selection**: non-CSV origin first (Bitwarden id >
+  `apple-csv-…`, so folder/favorite/fields on the BW side are
+  retained), then newer `revisionDate`, then newer `creationDate`.
+- **Other fields**: longest raw name wins, favorite OR, custom
+  fields union, collection-id union, folder disambiguation note
+  (same as logins — a drop in a different folder leaves
+  `[bitwarden-dedup] originally also in folder: …` on the survivor).
+- **Trash**: losers get `deletedDate = now` and are split into the
+  trash sidecar file alongside the main output; full recovery path
+  if you disagree with a merge.
+
+Secure notes and logins live in separate key namespaces — a login
+named `credentials.txt` and a secure note named `credentials.txt`
+never collide.
+
+**If you have same-name secure notes with divergent bodies that you
+*know* are the same concept** (e.g. two copies of the Wi-Fi router
+password where one has a trailing timestamp), the tool will keep them
+as separate items on purpose. Reconcile by hand in the Bitwarden UI
+after import; the safer default here is to under-merge rather than
+risk a semantic false positive on a generic title.
 
 ### A note on the TOTP heuristic
 
@@ -130,7 +219,8 @@ item carrying an older TOTP had some other field edited recently.
 Mitigations already baked in:
 
 - Losers are **trashed, not deleted** — every TOTP still reaches the
-  output inside its original item, in Bitwarden's Trash folder.
+  output inside its original item, preserved in the trash sidecar
+  file that accompanies the main output.
 - The audit file surfaces every affected group. Each entry carries
   `totp_conflict` (bool), `totp_kept_from_id` (which item contributed
   the survivor's TOTP), and `removed_totp_present` (did the trashed
@@ -187,6 +277,17 @@ Apple's Passwords app (macOS Sequoia / iOS 18+) exports a 6-column CSV
 `bitwarden-merge-icloud` binary merges that CSV into a Bitwarden JSON
 vault, producing `<bitwarden_stem>-with-icloud-credentials.json` with the
 same dedup rules applied across both sources.
+
+> **`just dedup` is not required before `just merge-with-icloud-credentials-csv`.**
+> The merge recipe runs the full dedup pipeline internally on the
+> combined (Bitwarden + CSV) set in one pass, so it already deduplicates
+> the Bitwarden side for you. The output
+> `<bitwarden_stem>-with-icloud-credentials.json` is self-contained and
+> import-ready — you do not also need to consume a separate `.dedup.json`.
+>
+> Run `just dedup` on its own only when (a) you have no iCloud CSV to
+> merge and want pure Bitwarden cleanup, or (b) you want to review an
+> intermediate Bitwarden-only artifact before adding iCloud data.
 
 ```bash
 # Auto-discover the latest bitwarden_export_*.json + newest *-Passwords.csv
@@ -246,14 +347,18 @@ array, then the shared dedup pipeline runs:
 - **Custom fields, passwordHistory, collectionIds, folder hints,
   favorite flag** — all merged exactly as they are for pure-Bitwarden
   dedup runs.
-- **Standalone Secure Notes** already in the Bitwarden vault
-  (`type: 2` — recovery codes, seed phrases, scanned document
-  fragments, anything that is not a login) are **preserved byte-
-  identical**. They never enter the dedup grouping step, so nothing
-  the user typed in a note body can be overwritten by a merge. A
-  note-only CSV row (Title + Notes only, no credentials) is added as
-  its own fresh `type: 2` Secure Note item; it does not touch any
-  existing Secure Note even if the contents look similar.
+- **Secure Notes (`type: 2`)** — a note-only CSV row (Title + Notes,
+  no credentials) becomes its own `type: 2` Secure Note item. After
+  the CSV rows are appended, the shared dedup pipeline runs a
+  dedicated Secure-Note pass that only collapses **literal
+  duplicates** — same `normalize_name(name)`, same `organizationId`,
+  same trimmed `notes` body. Bitwarden-origin secure notes outrank
+  same-named CSV rows as the survivor, so folder / favorite / fields
+  stay on the Bitwarden side by default. CSV rows whose body
+  *differs* from every existing Bitwarden note of the same name stay
+  as separate living items — the tool deliberately under-merges
+  rather than risk a semantic false positive. See
+  [Secure Notes dedup](#secure-notes-type-2-dedup) for the full rule set.
 
 ### What is **not** merged
 
@@ -270,19 +375,40 @@ transfer them — they remain in iCloud Keychain only:
 
 The tool prints this caveat to stdout at the end of every run.
 
-### Trashing semantics (applies to both dedup and merge)
+### Trashing semantics: two output files (applies to both dedup and merge)
 
-Dedup never removes an item. Losers get `deletedDate = <ISO-8601 now>`
-and stay in the output array, so after you import into Bitwarden they
-appear in the **Trash** folder. If you spot a false positive, restore
-it from Trash — no data is ever lost. This applies to:
+Dedup never removes an item. Every input item lands in one of two
+output files, never deleted from disk:
 
-- Items dropped when two Bitwarden items turn out to be duplicates.
-- Items dropped when a CSV row collapses with a Bitwarden item (either
-  the CSV copy or the existing one becomes the loser, depending on
-  `passwordHistory` length and `revisionDate`).
-- Items that arrived already trashed in the input (they pass through
-  with their original `deletedDate` intact).
+- `<stem>.dedup.json` (or `<stem>-with-icloud-credentials.json` for
+  the merge path) — **LIVING items only**. Every entry has
+  `deletedDate: null`. This is the file you import into Bitwarden;
+  its active vault will exactly match these items after a
+  purge-and-reimport.
+- `<stem>.dedup.trashed.json` (or
+  `<stem>-with-icloud-credentials.trashed.json`) — **trashed
+  losers**, same Bitwarden-JSON top-level shape, every entry carries
+  a non-null `deletedDate`. This file is **not imported
+  automatically**. It is your offline recovery copy: if you disagree
+  with any merge, look here to find the loser's full contents. If
+  your Bitwarden client version reliably honors `deletedDate` on
+  import, you can import this sidecar separately to populate the
+  Trash folder; if not, keep it as a local reference only.
+
+**Why the split?** Bitwarden's JSON importer handles `deletedDate`
+inconsistently across client versions — some put the items in Trash,
+others import them as active, producing visible duplicates in the
+Secure Notes / Logins views. Keeping trashed items out of the main
+`items` array is the only way to guarantee a clean active vault after
+import regardless of Bitwarden version.
+
+Items routed to the sidecar:
+
+- Losers from duplicate login groups (same credentials).
+- Losers from duplicate Secure Note groups (same name + body + org).
+- CSV rows that collapsed with an existing Bitwarden item.
+- Items that arrived already trashed in the input (their original
+  `deletedDate` is preserved as-is).
 
 Audit counts for a run appear both in stdout and in
 `<bitwarden_stem>-with-icloud-credentials.audit.json`:

@@ -63,7 +63,7 @@ use serde_json::{Map, Value, json};
 #[derive(Parser, Debug)]
 #[command(
     name = "bitwarden-redact",
-    about = "Produce a committable redacted replica of a Bitwarden vault export"
+    about = "Produce a local reviewer-shareable redacted replica of a Bitwarden vault export. NOT a committable repo artifact — the output still carries vault-shape metadata and is gitignored."
 )]
 struct Cli {
     /// Path to the real Bitwarden export JSON file.

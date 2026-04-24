@@ -26,8 +26,15 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Value, json};
 
 use crate::json_util::get_str;
-use crate::key::{dedup_key, skip_from_dedup};
-use crate::merge::{SurvivorPatch, apply_survivor_patch, build_survivor_patch};
+use crate::key::{
+    dedup_key, is_dedupable_secure_note, is_dedupable_ssh_key, secure_note_key, skip_from_dedup,
+    ssh_key_key,
+};
+use crate::merge::{
+    SecureNotePatch, SshKeyPatch, SurvivorPatch, apply_secure_note_patch, apply_ssh_key_patch,
+    apply_survivor_patch, build_secure_note_patch, build_ssh_key_patch, build_survivor_patch,
+    secure_note_source_label,
+};
 use crate::time_util::iso8601_now;
 
 /// Configuration knobs for a dedup run. Defaults match the documented
@@ -80,6 +87,14 @@ pub struct DedupStats {
     pub trashed: usize,
     pub merged: usize,
     pub totp_conflict_groups: usize,
+    /// How many duplicate folders were collapsed from the top-level
+    /// `folders` array. Two folders with the same normalized name
+    /// (e.g. two copies of `main` after an additive import) are merged
+    /// to one, and every item's `folderId` is remapped so references
+    /// stay valid. Only populated by [`dedup_export`] /
+    /// [`dedup_export_with_config`] — the plain [`dedup_items`]
+    /// entry points don't have the top-level `folders` array.
+    pub folders_deduplicated: usize,
     pub output: usize,
     pub living: usize,
     pub audit_entries: Vec<Value>,
@@ -95,19 +110,6 @@ impl DedupStats {
     }
 }
 
-fn empty_stats_full() -> DedupStats {
-    DedupStats {
-        total: 0,
-        skipped: 0,
-        groups: 0,
-        trashed: 0,
-        merged: 0,
-        totp_conflict_groups: 0,
-        output: 0,
-        living: 0,
-        audit_entries: Vec::new(),
-    }
-}
 
 /// Run the full dedup pipeline on a `Vec<Value>` of Bitwarden items in place.
 ///
@@ -145,25 +147,129 @@ pub fn dedup_items_with_config(items: &mut Vec<Value>, config: &DedupConfig) -> 
 /// Accepts the parsed top-level object (the structure `{folders, items, …}`
 /// that `bw export --format json` writes). Extracts the `folders` lookup,
 /// dedups `items` in place, and returns the same [`DedupStats`] as
-/// [`dedup_items`]. When the export has no `folders` array, behaves
-/// identically to [`dedup_items`].
-pub fn dedup_export(export: &mut Value) -> DedupStats {
+/// [`dedup_items`].
+///
+/// **Fail-fast**: returns `Err(...)` when the top-level value is not an
+/// object, when `items` is missing, or when `items` is present but not
+/// an array. Returning zeroed stats on malformed input would silently
+/// mask "wrong file pointed at the tool" — that is not safe for a
+/// transform that feeds straight into purge-and-reimport.
+pub fn dedup_export(export: &mut Value) -> Result<DedupStats, String> {
     dedup_export_with_config(export, &DedupConfig::default())
 }
 
 /// Same as [`dedup_export`] but with an explicit [`DedupConfig`].
-pub fn dedup_export_with_config(export: &mut Value, config: &DedupConfig) -> DedupStats {
+pub fn dedup_export_with_config(
+    export: &mut Value,
+    config: &DedupConfig,
+) -> Result<DedupStats, String> {
+    if !export.is_object() {
+        return Err("Bitwarden export is not a top-level JSON object".into());
+    }
+    // Fold duplicate folders (same normalized name) into one survivor
+    // per name, rewriting every item's `folderId` to the survivor's
+    // id. Bitwarden's additive import can leave duplicate "main"
+    // folders etc. in an export; this cleans them up before item
+    // dedup so the folder-disambiguation notes on merged items stay
+    // meaningful (they only fire for *genuinely* different folders).
+    let folders_deduplicated = dedup_folders_in_export(export)?;
+
     let folders = extract_folder_names(export);
-    let Some(items_value) = export.get_mut("items") else {
-        return empty_stats_full();
-    };
-    let Some(arr) = items_value.as_array_mut() else {
-        return empty_stats_full();
-    };
+    let items_value = export
+        .as_object_mut()
+        .expect("is_object checked above")
+        .get_mut("items")
+        .ok_or_else(|| "Bitwarden export is missing the `items` array".to_string())?;
+    let arr = items_value.as_array_mut().ok_or_else(|| {
+        "Bitwarden export `items` field exists but is not an array. Refusing to proceed."
+            .to_string()
+    })?;
     let mut items = std::mem::take(arr);
-    let stats = dedup_items_with_folders(&mut items, &folders, config);
+    let mut stats = dedup_items_with_folders(&mut items, &folders, config);
+    stats.folders_deduplicated = folders_deduplicated;
     *arr = items;
-    stats
+    Ok(stats)
+}
+
+/// Collapse duplicate entries in the top-level `folders` array and
+/// remap every item's `folderId` to the surviving folder's id.
+///
+/// - Folders group by [`crate::key::normalize_note_name`] (case-fold +
+///   trim + invisible-char scrub). The login-style `(email)` stripping
+///   is intentionally NOT applied — folder names can legitimately
+///   carry email content.
+/// - Survivor per group: the folder that appears first in input order.
+///   Folders in Bitwarden exports don't have revisionDate, so there
+///   is no more-principled tiebreak.
+///
+/// Returns the number of duplicate folders collapsed (always
+/// `input_folders - output_folders`).
+fn dedup_folders_in_export(export: &mut Value) -> Result<usize, String> {
+    let Some(obj) = export.as_object_mut() else {
+        return Err("export is not a top-level JSON object".into());
+    };
+    let Some(folders_value) = obj.get_mut("folders") else {
+        return Ok(0);
+    };
+    let Some(folders) = folders_value.as_array_mut() else {
+        // Some exports carry `folders: null`. Treat as "no folders".
+        return Ok(0);
+    };
+
+    // Map duplicate-folder-id → survivor-id, so items can be remapped.
+    let mut id_remap: HashMap<String, String> = HashMap::new();
+    let mut seen: HashMap<String, String> = HashMap::new(); // normalized name → survivor id
+    let mut keep: Vec<Value> = Vec::with_capacity(folders.len());
+
+    for f in std::mem::take(folders) {
+        let id = f
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_default();
+        let name_raw = f.get("name").and_then(Value::as_str).unwrap_or("");
+        let key = crate::key::normalize_note_name(name_raw);
+        match seen.get(&key) {
+            Some(survivor_id) => {
+                if !id.is_empty() {
+                    id_remap.insert(id, survivor_id.clone());
+                }
+            }
+            None => {
+                if !id.is_empty() {
+                    seen.insert(key, id.clone());
+                }
+                keep.push(f);
+            }
+        }
+    }
+    let collapsed = id_remap.len();
+    *folders = keep;
+
+    // Remap folderId references on every item (living and trashed).
+    if collapsed > 0
+        && let Some(items) = obj.get_mut("items").and_then(Value::as_array_mut)
+    {
+        for item in items {
+            let Some(item_obj) = item.as_object_mut() else {
+                continue;
+            };
+            let Some(folder_id_val) = item_obj.get("folderId") else {
+                continue;
+            };
+            let Some(folder_id_str) = folder_id_val.as_str() else {
+                continue;
+            };
+            if let Some(survivor) = id_remap.get(folder_id_str) {
+                item_obj.insert(
+                    "folderId".to_string(),
+                    Value::String(survivor.clone()),
+                );
+            }
+        }
+    }
+
+    Ok(collapsed)
 }
 
 fn extract_folder_names(export: &Value) -> HashMap<String, String> {
@@ -314,9 +420,10 @@ pub(crate) fn dedup_items_with_folders(
         apply_survivor_patch(&mut items[keep_idx], patch);
     }
 
-    // Pass 4: mark losers with `deletedDate = now`. They stay in the array
-    // so Bitwarden surfaces them in the Trash folder after import. Nothing
-    // is ever removed — the user can manually recover any false positive.
+    // Pass 4: mark login dedup losers with `deletedDate = now`. They stay
+    // in the array so Bitwarden surfaces them in the Trash folder after
+    // import. Nothing is ever removed — the user can manually recover
+    // any false positive.
     let now = iso8601_now();
     for (i, item) in items.iter_mut().enumerate() {
         if to_drop.contains(&i)
@@ -325,7 +432,22 @@ pub(crate) fn dedup_items_with_folders(
             obj.insert("deletedDate".to_string(), Value::String(now.clone()));
         }
     }
-    let trashed = to_drop.len();
+
+    // Pass 5: secure-note dedup.
+    let (note_groups, note_trashed, note_audit_entries) =
+        dedup_secure_notes(items, folders, &now);
+
+    // Pass 6: SSH key dedup.
+    let (ssh_groups, ssh_trashed, ssh_audit_entries) =
+        dedup_ssh_keys(items, folders, &now);
+
+    // Combined counts cover every pass.
+    let trashed = to_drop.len() + note_trashed + ssh_trashed;
+    let groups_total = dupe_groups.len() + note_groups + ssh_groups;
+    let mut combined_audit = audit_entries;
+    combined_audit.extend(note_audit_entries);
+    combined_audit.extend(ssh_audit_entries);
+
     let output = items.len();
     let living = items
         .iter()
@@ -339,14 +461,218 @@ pub(crate) fn dedup_items_with_folders(
     DedupStats {
         total,
         skipped,
-        groups: dupe_groups.len(),
+        groups: groups_total,
         trashed,
         merged: total_merged,
         totp_conflict_groups,
+        // Set to zero at the item-dedup layer — populated by
+        // `dedup_export_with_config` when it processes the top-level
+        // `folders` array before calling us.
+        folders_deduplicated: 0,
         output,
         living,
-        audit_entries,
+        audit_entries: combined_audit,
     }
+}
+
+/// Second dedup pass dedicated to secure notes (`type: 2`).
+///
+/// Secure notes never entered [`dedup_key`] grouping — they have no
+/// credentials. Instead they group by [`secure_note_key`] (normalized
+/// name), pick a survivor by "longest notes body → newer revisionDate
+/// → newer creationDate", and the drop's body (if it differs) is
+/// appended to the survivor under a `=== Merged <ts> Source [...] ===`
+/// header so nothing the user typed is lost.
+///
+/// Returns `(groups_collapsed, losers_trashed, per-entry audit records)`.
+fn dedup_secure_notes(
+    items: &mut Vec<Value>,
+    folders: &HashMap<String, String>,
+    now: &str,
+) -> (usize, usize, Vec<Value>) {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        if !is_dedupable_secure_note(item) {
+            continue;
+        }
+        groups.entry(secure_note_key(item)).or_default().push(idx);
+    }
+    let mut dupe_groups: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|v| v.len() > 1)
+        .collect();
+    dupe_groups.sort_by_key(|g| *g.first().unwrap_or(&0));
+
+    let mut to_drop: HashSet<usize> = HashSet::new();
+    let mut audit_entries: Vec<Value> = Vec::new();
+    let mut patches: Vec<(usize, SecureNotePatch)> = Vec::new();
+
+    for group in &dupe_groups {
+        let mut ordered = group.clone();
+        // Survivor selection for secure notes:
+        // 1. Prefer non-CSV origin (Bitwarden id > `apple-csv-…` id) so
+        //    folder/favorite/fields on the BW side are retained.
+        // 2. Then newer `revisionDate`, then newer `creationDate`.
+        // Note: we don't rank by body length here because the strict key
+        // (see [`crate::key::secure_note_key`]) guarantees every item in
+        // the group already has the same trimmed body.
+        ordered.sort_by(|a, b| {
+            let a_pref = secure_note_non_csv_rank(&items[*a]);
+            let b_pref = secure_note_non_csv_rank(&items[*b]);
+            let a_rev = get_str(&items[*a], "revisionDate");
+            let b_rev = get_str(&items[*b], "revisionDate");
+            let a_cre = get_str(&items[*a], "creationDate");
+            let b_cre = get_str(&items[*b], "creationDate");
+            (b_pref, b_rev, b_cre).cmp(&(a_pref, a_rev, a_cre))
+        });
+        let keep_idx = ordered[0];
+        let drop_idxs = &ordered[1..];
+
+        let keep = &items[keep_idx];
+        let drops: Vec<&Value> = drop_idxs.iter().map(|i| &items[*i]).collect();
+        let patch = build_secure_note_patch(keep, &drops, folders);
+
+        let keep_id = keep.get("id").cloned().unwrap_or(Value::Null);
+        let keep_name_audit = Value::String(patch.longest_name.clone());
+        let keep_rev = keep.get("revisionDate").cloned().unwrap_or(Value::Null);
+        let keep_folder = keep.get("folderId").cloned().unwrap_or(Value::Null);
+        let fields_merged = patch.field_additions.len();
+        let collections_merged = patch.collection_additions.len();
+        let folder_note_added = patch.folder_note_line.is_some();
+
+        for &di in drop_idxs {
+            to_drop.insert(di);
+            let dropped = &items[di];
+            audit_entries.push(json!({
+                "item_kind": "secure_note",
+                "removed_id": dropped.get("id").cloned().unwrap_or(Value::Null),
+                "removed_name": dropped.get("name").cloned().unwrap_or(Value::Null),
+                "removed_source": secure_note_source_label(dropped),
+                "removed_revisionDate": dropped.get("revisionDate").cloned().unwrap_or(Value::Null),
+                "removed_creationDate": dropped.get("creationDate").cloned().unwrap_or(Value::Null),
+                "removed_folderId": dropped.get("folderId").cloned().unwrap_or(Value::Null),
+                "kept_id": keep_id.clone(),
+                "kept_name": keep_name_audit.clone(),
+                "kept_revisionDate": keep_rev.clone(),
+                "kept_folderId": keep_folder.clone(),
+                "fields_merged": fields_merged,
+                "collections_merged": collections_merged,
+                "folder_note_added": folder_note_added,
+            }));
+        }
+
+        patches.push((keep_idx, patch));
+    }
+
+    for (keep_idx, patch) in patches {
+        apply_secure_note_patch(&mut items[keep_idx], patch);
+    }
+    for (i, item) in items.iter_mut().enumerate() {
+        if to_drop.contains(&i)
+            && let Some(obj) = item.as_object_mut()
+        {
+            obj.insert("deletedDate".to_string(), Value::String(now.to_string()));
+        }
+    }
+
+    (dupe_groups.len(), to_drop.len(), audit_entries)
+}
+
+/// Higher rank = preferred as survivor. Non-CSV-origin items outrank
+/// CSV-origin synthetic items so Bitwarden-side metadata (folderId,
+/// fields, creationDate) survives by default when keys match.
+fn secure_note_non_csv_rank(item: &Value) -> u8 {
+    match item.get("id").and_then(Value::as_str) {
+        Some(id) if id.starts_with("apple-csv-") => 0,
+        _ => 1,
+    }
+}
+
+/// Third dedup pass: SSH keys (`type: 5`). Groups by
+/// [`ssh_key_key`] (full canonicalized `sshKey` object + org), picks a
+/// survivor by newer `revisionDate` then newer `creationDate`, trashes
+/// the losers. Key material is never merged — it's in the grouping
+/// key, so every item in a group already has the exact same public
+/// key, private key, and fingerprint.
+fn dedup_ssh_keys(
+    items: &mut Vec<Value>,
+    folders: &HashMap<String, String>,
+    now: &str,
+) -> (usize, usize, Vec<Value>) {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        if !is_dedupable_ssh_key(item) {
+            continue;
+        }
+        groups.entry(ssh_key_key(item)).or_default().push(idx);
+    }
+    let mut dupe_groups: Vec<Vec<usize>> =
+        groups.into_values().filter(|v| v.len() > 1).collect();
+    dupe_groups.sort_by_key(|g| *g.first().unwrap_or(&0));
+
+    let mut to_drop: HashSet<usize> = HashSet::new();
+    let mut audit_entries: Vec<Value> = Vec::new();
+    let mut patches: Vec<(usize, SshKeyPatch)> = Vec::new();
+
+    for group in &dupe_groups {
+        let mut ordered = group.clone();
+        ordered.sort_by(|a, b| {
+            let a_rev = get_str(&items[*a], "revisionDate");
+            let b_rev = get_str(&items[*b], "revisionDate");
+            let a_cre = get_str(&items[*a], "creationDate");
+            let b_cre = get_str(&items[*b], "creationDate");
+            (b_rev, b_cre).cmp(&(a_rev, a_cre))
+        });
+        let keep_idx = ordered[0];
+        let drop_idxs = &ordered[1..];
+
+        let keep = &items[keep_idx];
+        let drops: Vec<&Value> = drop_idxs.iter().map(|i| &items[*i]).collect();
+        let patch = build_ssh_key_patch(keep, &drops, folders);
+
+        let keep_id = keep.get("id").cloned().unwrap_or(Value::Null);
+        let keep_name_audit = Value::String(patch.longest_name.clone());
+        let keep_rev = keep.get("revisionDate").cloned().unwrap_or(Value::Null);
+        let keep_folder = keep.get("folderId").cloned().unwrap_or(Value::Null);
+        let fields_merged = patch.field_additions.len();
+        let collections_merged = patch.collection_additions.len();
+        let folder_note_added = patch.folder_note_line.is_some();
+
+        for &di in drop_idxs {
+            to_drop.insert(di);
+            let dropped = &items[di];
+            audit_entries.push(json!({
+                "item_kind": "ssh_key",
+                "removed_id": dropped.get("id").cloned().unwrap_or(Value::Null),
+                "removed_name": dropped.get("name").cloned().unwrap_or(Value::Null),
+                "removed_revisionDate": dropped.get("revisionDate").cloned().unwrap_or(Value::Null),
+                "removed_creationDate": dropped.get("creationDate").cloned().unwrap_or(Value::Null),
+                "removed_folderId": dropped.get("folderId").cloned().unwrap_or(Value::Null),
+                "kept_id": keep_id.clone(),
+                "kept_name": keep_name_audit.clone(),
+                "kept_revisionDate": keep_rev.clone(),
+                "kept_folderId": keep_folder.clone(),
+                "fields_merged": fields_merged,
+                "collections_merged": collections_merged,
+                "folder_note_added": folder_note_added,
+            }));
+        }
+
+        patches.push((keep_idx, patch));
+    }
+
+    for (keep_idx, patch) in patches {
+        apply_ssh_key_patch(&mut items[keep_idx], patch);
+    }
+    for (i, item) in items.iter_mut().enumerate() {
+        if to_drop.contains(&i)
+            && let Some(obj) = item.as_object_mut()
+        {
+            obj.insert("deletedDate".to_string(), Value::String(now.to_string()));
+        }
+    }
+
+    (dupe_groups.len(), to_drop.len(), audit_entries)
 }
 
 fn password_history_len(item: &Value) -> usize {
@@ -362,19 +688,29 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn empty_export_returns_zeroed_stats() {
-        // `dedup_export` on a document missing `items` or with an empty
-        // array must return zeroed stats without panicking.
+    fn dedup_export_errors_on_missing_items() {
+        // Malformed top-level input must fail loud — returning zeroed
+        // stats would silently swallow "wrong file pointed at the tool"
+        // mistakes upstream of a purge-and-reimport.
         let mut no_items = json!({"folders": []});
-        let s = dedup_export(&mut no_items);
-        assert_eq!(s.total, 0);
-        assert_eq!(s.trashed, 0);
-        assert_eq!(s.output, 0);
-        assert_eq!(s.living, 0);
+        let err = dedup_export(&mut no_items).unwrap_err();
+        assert!(err.contains("missing"), "error must mention missing items: {err:?}");
+    }
 
-        let mut empty_items = json!({"folders": [], "items": []});
-        let s = dedup_export(&mut empty_items);
+    #[test]
+    fn dedup_export_errors_on_non_array_items() {
+        let mut bad = json!({"folders": [], "items": "oops"});
+        let err = dedup_export(&mut bad).unwrap_err();
+        assert!(err.contains("not an array"), "error must explain the shape issue: {err:?}");
+    }
+
+    #[test]
+    fn dedup_export_succeeds_on_empty_items_array() {
+        // An empty but well-shaped export is valid — it's just a no-op.
+        let mut empty = json!({"folders": [], "items": []});
+        let s = dedup_export(&mut empty).unwrap();
         assert_eq!(s.total, 0);
+        assert_eq!(s.output, 0);
     }
 
     #[test]

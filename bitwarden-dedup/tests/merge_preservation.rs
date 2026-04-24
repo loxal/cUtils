@@ -296,7 +296,7 @@ fn appends_folder_note_when_drops_differ() {
             }
         ]
     });
-    dedup_export(&mut export);
+    dedup_export(&mut export).unwrap();
     let items = export["items"].as_array().unwrap();
     let survivor = living_by_dedup_group(items);
     let notes = survivor.get("notes").and_then(Value::as_str).unwrap_or("");
@@ -385,7 +385,7 @@ fn dedup_export_reads_top_level_folders_and_dedups_items() {
             }
         ]
     });
-    let stats = dedup_export(&mut export);
+    let stats = dedup_export(&mut export).unwrap();
     assert_eq!(stats.output, 2, "all items stay in output");
     assert_eq!(stats.living, 1);
     assert_eq!(stats.trashed, 1);

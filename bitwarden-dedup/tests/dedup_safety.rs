@@ -17,7 +17,7 @@
 //!
 //! All tests exercise the public `dedup_items` API.
 
-use bitwarden_dedup::{DedupConfig, dedup_items, dedup_items_with_config};
+use bitwarden_dedup::{DedupConfig, dedup_export, dedup_items, dedup_items_with_config};
 use serde_json::{Value, json};
 
 fn living(items: &[Value]) -> Vec<&Value> {
@@ -270,11 +270,10 @@ fn split_divergent_totps_opt_in_keeps_items_separate() {
 }
 
 #[test]
-fn standalone_secure_notes_pass_through_unchanged() {
-    // Bitwarden `type: 2` (Secure Note) items — recovery codes, Wi-Fi
-    // passwords written down, crypto wallet seed phrases, etc. — are
-    // never part of a dedup group. They must land in the output byte-
-    // identical to the input so no user-typed note text is ever lost.
+fn lone_secure_note_passes_through_unchanged() {
+    // A `type: 2` Secure Note with no same-name sibling has no dedup
+    // group to collapse, so it must land in the output byte-identical
+    // to the input — every field preserved, not trashed.
     let secure_note_input = json!({
         "id": "note-1",
         "type": 2,
@@ -300,39 +299,152 @@ fn standalone_secure_notes_pass_through_unchanged() {
     ];
     let stats = dedup_items(&mut items);
     assert_eq!(stats.trashed, 0);
-    // Find our secure note in the output.
     let survivor = items
         .iter()
         .find(|i| i["id"].as_str() == Some("note-1"))
         .expect("secure note must still be in output");
-    // Every field on the input note is preserved byte-identical.
     assert_eq!(*survivor, secure_note_input);
 }
 
 #[test]
-fn secure_notes_do_not_collapse_with_each_other() {
-    // Even if two `type: 2` items share the same `name` and `notes`,
-    // the dedup pipeline must leave both alone. We do not try to be
-    // clever about secure-note identity — their content can be
-    // arbitrarily similar and still represent different records (two
-    // separate sets of recovery codes, for example).
+fn same_name_secure_notes_collapse_with_identical_body_deduped() {
+    // Two `type: 2` items sharing the same name AND the same notes body
+    // collapse into one living survivor; the loser is trashed. The
+    // surviving notes body is unchanged (no `=== Merged === ` header
+    // because the drop's body was identical and therefore skipped).
     let mut items = vec![
         json!({
             "id": "n-a", "type": 2, "name": "Recovery",
             "notes": "codes",
-            "revisionDate": "2026-01-01T00:00:00Z",
+            "revisionDate": "2026-02-01T00:00:00Z",
             "secureNote": {"type": 0}
         }),
         json!({
             "id": "n-b", "type": 2, "name": "Recovery",
             "notes": "codes",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        }),
+    ];
+    let stats = dedup_items(&mut items);
+    assert_eq!(stats.trashed, 1);
+    let alive = living(&items);
+    assert_eq!(alive.len(), 1);
+    assert_eq!(alive[0]["notes"].as_str(), Some("codes"),
+        "identical bodies should not produce a merge banner");
+    assert_eq!(trashed(&items).len(), 1, "loser preserved in Trash");
+}
+
+#[test]
+fn same_name_secure_notes_with_different_bodies_stay_separate() {
+    // Strict secure-note key: two notes sharing only a name but
+    // carrying different trimmed bodies are NOT considered duplicates.
+    // Both stay living — the operator reconciles by hand if they
+    // actually represent the same concept. This is the safety floor
+    // that protects generic names like "Recovery" or "credentials.txt".
+    let mut items = vec![
+        json!({
+            "id": "bw-note", "type": 2, "name": "Abus Lock",
+            "notes": "official share URL saved 2024",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        }),
+        json!({
+            "id": "apple-csv-1776000000-000042", "type": 2, "name": "Abus Lock",
+            "notes": "completely different note body — not a duplicate",
+            "revisionDate": "2026-04-23T00:00:00Z",
+            "secureNote": {"type": 0}
+        }),
+    ];
+    let stats = dedup_items(&mut items);
+    assert_eq!(stats.trashed, 0, "distinct bodies must not auto-collapse");
+    assert_eq!(living(&items).len(), 2, "both notes stay living");
+}
+
+#[test]
+fn personal_and_org_secure_notes_never_cross_dedup() {
+    // Personal (organizationId=null) and org-owned notes with the same
+    // name AND body must never collapse — they live in different
+    // vaults with different access control.
+    let mut items = vec![
+        json!({
+            "id": "personal", "type": 2, "name": "Shared Wiki",
+            "organizationId": null,
+            "notes": "internal URL",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        }),
+        json!({
+            "id": "org", "type": 2, "name": "Shared Wiki",
+            "organizationId": "11111111-1111-1111-1111-111111111111",
+            "notes": "internal URL",
             "revisionDate": "2026-02-01T00:00:00Z",
             "secureNote": {"type": 0}
         }),
     ];
     let stats = dedup_items(&mut items);
-    assert_eq!(stats.trashed, 0, "secure notes must never be trashed by dedup");
-    assert_eq!(living(&items).len(), 2, "both secure notes stay living");
+    assert_eq!(stats.trashed, 0, "personal and org notes must not cross-dedup");
+    assert_eq!(living(&items).len(), 2);
+}
+
+#[test]
+fn secure_note_loser_preserved_in_trash_with_deleted_date() {
+    // Consistent with login dedup: a trashed secure note still carries
+    // its original body (byte-identical, including any surrounding
+    // whitespace) so the operator can recover from Bitwarden's Trash.
+    // Strict-body grouping: both items must share the same trimmed
+    // body to land in the same group.
+    let mut items = vec![
+        json!({
+            "id": "newer", "type": 2, "name": "Wallet",
+            "notes": "seed",
+            "revisionDate": "2026-06-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        }),
+        json!({
+            "id": "older", "type": 2, "name": "Wallet",
+            // Same trimmed body as the newer item → both group together.
+            "notes": "  seed\n",
+            "revisionDate": "2025-01-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        }),
+    ];
+    dedup_items(&mut items);
+    let dropped = items
+        .iter()
+        .find(|i| i["id"].as_str() == Some("older"))
+        .unwrap();
+    assert!(
+        !dropped["deletedDate"].is_null(),
+        "older (= loser) must carry deletedDate so Bitwarden shows it in Trash"
+    );
+    assert_eq!(
+        dropped["notes"].as_str(),
+        Some("  seed\n"),
+        "trashed loser retains its original body byte-for-byte — recoverable"
+    );
+}
+
+#[test]
+fn secure_notes_and_logins_with_same_name_do_not_collide() {
+    // A login and a secure note that happen to share a display name
+    // must stay separate — different type namespaces.
+    let mut items = vec![
+        json!({
+            "id": "note", "type": 2, "name": "credentials.txt",
+            "notes": "private notes body",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "secureNote": {"type": 0}
+        }),
+        json!({
+            "id": "login", "type": 1, "name": "credentials.txt",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"}
+        }),
+    ];
+    let stats = dedup_items(&mut items);
+    assert_eq!(stats.trashed, 0, "login/note cross-type grouping must not happen");
+    assert_eq!(living(&items).len(), 2);
 }
 
 #[test]
@@ -399,4 +511,163 @@ fn dedup_never_removes_items_from_output() {
             t
         );
     }
+}
+
+// --- SSH key dedup --------------------------------------------------
+
+#[test]
+fn ssh_keys_with_identical_material_collapse() {
+    // Two `type: 5` items carrying the exact same SSH key material —
+    // same public key, private key, fingerprint — dedup cleanly. The
+    // loser is trashed, key material never touched.
+    let ssh = json!({
+        "publicKey": "ssh-ed25519 AAAAC... alex@laptop",
+        "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n-----END-----",
+        "keyFingerprint": "SHA256:abcd1234"
+    });
+    let mut items = vec![
+        json!({
+            "id": "newer", "type": 5, "name": "laptop-ed25519",
+            "revisionDate": "2026-02-01T00:00:00Z",
+            "sshKey": ssh
+        }),
+        json!({
+            "id": "older", "type": 5, "name": "laptop key",
+            "revisionDate": "2025-01-01T00:00:00Z",
+            "sshKey": json!({
+                "publicKey": "ssh-ed25519 AAAAC... alex@laptop",
+                "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n-----END-----",
+                "keyFingerprint": "SHA256:abcd1234"
+            })
+        }),
+    ];
+    let stats = dedup_items(&mut items);
+    assert_eq!(stats.trashed, 1);
+    let alive = living(&items);
+    assert_eq!(alive.len(), 1);
+    assert_eq!(alive[0]["id"].as_str(), Some("newer"));
+    // Longest name wins on the merged record.
+    assert_eq!(alive[0]["name"].as_str(), Some("laptop-ed25519"));
+    // Key material untouched.
+    assert_eq!(alive[0]["sshKey"]["keyFingerprint"].as_str(), Some("SHA256:abcd1234"));
+}
+
+#[test]
+fn ssh_keys_with_different_private_keys_never_merge() {
+    // Same public key + different private key material is almost
+    // certainly corrupt state. Refuse to guess — keep both living.
+    let mut items = vec![
+        json!({
+            "type": 5, "name": "id-ed25519",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "sshKey": {
+                "publicKey": "ssh-ed25519 AAAA.SAME",
+                "privateKey": "PRIV-ONE",
+                "keyFingerprint": "fp-1"
+            }
+        }),
+        json!({
+            "type": 5, "name": "id-ed25519",
+            "revisionDate": "2026-02-01T00:00:00Z",
+            "sshKey": {
+                "publicKey": "ssh-ed25519 AAAA.SAME",
+                "privateKey": "PRIV-TWO",
+                "keyFingerprint": "fp-2"
+            }
+        }),
+    ];
+    let stats = dedup_items(&mut items);
+    assert_eq!(stats.trashed, 0, "divergent SSH private keys must never merge");
+    assert_eq!(living(&items).len(), 2);
+}
+
+// --- Folder dedup ---------------------------------------------------
+
+#[test]
+fn duplicate_folders_collapse_and_folder_ids_remap() {
+    // Two folders share the same normalized name ("main"). They
+    // collapse to one and every item's `folderId` is remapped to the
+    // survivor so references stay valid after import.
+    let mut export = json!({
+        "folders": [
+            {"id": "folder-a", "name": "main"},
+            {"id": "folder-b", "name": "main"},
+            {"id": "folder-c", "name": "work"}
+        ],
+        "items": [
+            {
+                "id": "item-1", "type": 1, "name": "Site-A",
+                "folderId": "folder-a",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "login": {"username": "u1", "password": "p1"}
+            },
+            {
+                "id": "item-2", "type": 1, "name": "Site-B",
+                "folderId": "folder-b",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "login": {"username": "u2", "password": "p2"}
+            },
+            {
+                "id": "item-3", "type": 1, "name": "Site-C",
+                "folderId": "folder-c",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "login": {"username": "u3", "password": "p3"}
+            }
+        ]
+    });
+    let stats = dedup_export(&mut export).unwrap();
+    assert_eq!(stats.folders_deduplicated, 1);
+    // Two unique folder names remain: `main` and `work`.
+    let folders = export["folders"].as_array().unwrap();
+    assert_eq!(folders.len(), 2);
+    let names: Vec<&str> = folders
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(names.contains(&"main"));
+    assert!(names.contains(&"work"));
+    // Items that used to live in folder-b now point at folder-a
+    // (first-seen wins), item-3 still points at folder-c.
+    let items = export["items"].as_array().unwrap();
+    let by_id = |id: &str| {
+        items
+            .iter()
+            .find(|i| i["id"].as_str() == Some(id))
+            .expect(id)
+    };
+    assert_eq!(by_id("item-1")["folderId"].as_str(), Some("folder-a"));
+    assert_eq!(
+        by_id("item-2")["folderId"].as_str(),
+        Some("folder-a"),
+        "item originally in folder-b must be remapped to survivor folder-a"
+    );
+    assert_eq!(by_id("item-3")["folderId"].as_str(), Some("folder-c"));
+}
+
+#[test]
+fn folder_dedup_ignores_invisible_noise_in_names() {
+    // Folders with the same visible name but with ZWSP / NBSP noise
+    // collapse just like secure notes.
+    let mut export = json!({
+        "folders": [
+            {"id": "f-1", "name": "main"},
+            {"id": "f-2", "name": "\u{00A0}ma\u{200B}in\u{00A0}"}
+        ],
+        "items": []
+    });
+    let stats = dedup_export(&mut export).unwrap();
+    assert_eq!(stats.folders_deduplicated, 1);
+    assert_eq!(export["folders"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn folder_dedup_tolerates_missing_or_null_folders_field() {
+    // Exports that don't carry `folders` (or carry `folders: null`)
+    // must not blow up — just report zero collapses.
+    let mut no_folders = json!({"items": []});
+    let s = dedup_export(&mut no_folders).unwrap();
+    assert_eq!(s.folders_deduplicated, 0);
+    let mut null_folders = json!({"folders": null, "items": []});
+    let s = dedup_export(&mut null_folders).unwrap();
+    assert_eq!(s.folders_deduplicated, 0);
 }

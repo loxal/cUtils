@@ -3,13 +3,18 @@
 //! Merge an Apple Passwords CSV export into a Bitwarden JSON vault.
 //!
 //! Reads both files, appends each CSV row as a synthetic Bitwarden item,
-//! runs the standard dedup pipeline so overlaps collapse (URIs union, notes
-//! merge, TOTP keeps newest, passkeys/FIDO2 stay strict-match), and writes
-//! the combined vault with a `-with-icloud-credentials` suffix.
+//! runs the standard dedup pipeline so overlaps collapse (URIs union,
+//! notes merge, TOTP keeps newest, passkeys/FIDO2 stay strict-match),
+//! and writes the living-only combined vault with a
+//! `-with-icloud-credentials` suffix.
 //!
-//! Nothing is ever removed: dedup losers get `deletedDate = now` so they
-//! show up in Bitwarden's Trash folder after import and can be recovered
-//! by hand.
+//! Nothing is ever removed. Dedup losers get `deletedDate = now` and
+//! are split into a separate sidecar file
+//! (`*-with-icloud-credentials.trashed.json`) — same Bitwarden-JSON
+//! shape, not auto-imported — so Bitwarden's active vault stays clean
+//! after import regardless of how the target client handles
+//! `deletedDate`. The sidecar is the operator's offline recovery
+//! copy; importing it separately populates Bitwarden's Trash.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,8 +84,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let audit_path = cli
         .audit
         .unwrap_or_else(|| suffix_sibling(&bw_path, "-with-icloud-credentials.audit.json"));
+    // Compute the trash sidecar path up front so it participates in
+    // the path-safety check — a custom --output matching the default
+    // sidecar path would otherwise race us at write time and clobber
+    // the recovery copy.
+    let trashed_path = suffix_sibling(&bw_path, "-with-icloud-credentials.trashed.json");
 
-    check_paths_distinct(&[&bw_path, &csv_path, &output_path, &audit_path], cli.force)?;
+    check_paths_distinct(
+        &[&bw_path, &csv_path, &output_path, &audit_path, &trashed_path],
+        cli.force,
+    )?;
 
     let bw_text = fs::read_to_string(&bw_path)
         .map_err(|e| format!("reading {}: {e}", bw_path.display()))?;
@@ -111,13 +124,32 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let stats = merge_icloud_csv_into_export_with_config(&mut export, &csv_text, &config)?;
 
+    // Partition dedup output into living vs trashed. The main output
+    // file only contains living items — that way Bitwarden's import
+    // cannot misplace dedup losers into the active vault view if its
+    // `deletedDate` handling is lenient or version-dependent. Trashed
+    // items are written to a sidecar file in the same Bitwarden-JSON
+    // shape so the operator can inspect them or, if desired, import
+    // them separately to populate Bitwarden's Trash folder. If this
+    // run produces zero losers, a stale sidecar from a previous run
+    // is deleted so an outdated recovery copy never sits next to
+    // fresh output.
+    let trashed_count = split_items_to_sidecar(&mut export, &trashed_path)?;
+
     write_sensitive_atomic(&output_path, &serde_json::to_string_pretty(&export)?)?;
 
     let dedup = &stats.dedup_stats;
+    let trashed_sidecar = if trashed_count > 0 {
+        Value::String(trashed_path.to_string_lossy().into_owned())
+    } else {
+        Value::Null
+    };
     let audit_doc = json!({
         "bitwarden_input": bw_path.to_string_lossy(),
         "icloud_csv_input": csv_path.to_string_lossy(),
         "output": output_path.to_string_lossy(),
+        "trashed_sidecar": trashed_sidecar,
+        "trashed_sidecar_item_count": trashed_count,
         "split_divergent_totps": config.split_divergent_totps,
         "csv_rows_total": stats.csv_rows,
         "csv_rows_appended": stats.csv_items_appended,
@@ -128,6 +160,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "combined_trashed_count": dedup.trashed,
         "duplicate_groups": dedup.groups,
         "totp_conflict_groups": dedup.totp_conflict_groups,
+        "folders_deduplicated": dedup.folders_deduplicated,
         "skipped_from_dedup": dedup.skipped,
         "uris_merged_into_kept_total": dedup.merged,
         "entries": dedup.audit_entries.clone(),
@@ -145,11 +178,32 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "Groups:          {} strict duplicate groups across Bitwarden + iCloud",
         dedup.groups
     );
-    if dedup.totp_conflict_groups > 0 {
+    if dedup.folders_deduplicated > 0 {
         println!(
-            "TOTP conflicts:  {} group(s) carried >1 distinct non-empty TOTP (audit entries: totp_conflict=true; rerun with --split-divergent-totps to keep them separate)",
+            "Folders:         {} duplicate folder(s) collapsed; every item's folderId was remapped to the surviving folder.",
+            dedup.folders_deduplicated
+        );
+    }
+    if dedup.totp_conflict_groups > 0 {
+        println!();
+        println!(
+            "!! TOTP CONFLICT: {} group(s) had >1 distinct non-empty TOTP. The",
             dedup.totp_conflict_groups
         );
+        println!(
+            "   newest-by-revisionDate secret is on the survivor; the older ones"
+        );
+        println!(
+            "   are in Trash. If you do NOT trust that heuristic, rerun"
+        );
+        println!(
+            "   `just merge-with-icloud-credentials-csv-split-totps` to keep"
+        );
+        println!(
+            "   divergent-TOTP items as separate living entries. Audit records"
+        );
+        println!("   for each group carry `totp_conflict: true`.");
+        println!();
     }
     println!(
         "Trashed:         {} items routed to Bitwarden Trash by this run (CSV + Bitwarden duplicates; deletedDate set — recoverable after import)",
@@ -163,11 +217,29 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "                 (notes, custom fields, TOTP, passwordHistory, collections, folders merged into survivors)"
     );
     println!("Output:          {}", output_path.display());
-    let total_trashed_in_output = dedup.output.saturating_sub(dedup.living);
     println!(
-        "                 {} items ({} living, {} in Trash — includes any items that arrived pre-trashed)",
-        dedup.output, dedup.living, total_trashed_in_output
+        "                 {} items — all living (clean import into Bitwarden's active vault)",
+        dedup.living
     );
+    if trashed_count > 0 {
+        println!("Trash sidecar:   {}", trashed_path.display());
+        println!(
+            "                 {} items carrying `deletedDate` (dedup losers plus anything that arrived pre-trashed in the inputs).",
+            trashed_count
+        );
+        println!(
+            "                 This file is NOT auto-imported; Bitwarden's JSON importer handles `deletedDate` inconsistently, and"
+        );
+        println!(
+            "                 keeping trashed items out of the main `items` array is the only reliable way to prevent them from"
+        );
+        println!(
+            "                 showing up as duplicates in the active view after import. Import this sidecar separately if you"
+        );
+        println!(
+            "                 want to populate Bitwarden's Trash folder, or keep it locally as an offline recovery copy."
+        );
+    }
     println!("Audit:           {}", audit_path.display());
     println!();
     println!("What is NOT merged (Apple's CSV does not export these):");
@@ -177,9 +249,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Any passkey / FIDO2 credential that already exists on the Bitwarden");
     println!("  side is preserved untouched.");
     println!();
-    println!("Import workflow:");
-    println!("  1. Back up your current vault (keep the original export file).");
+    println!(
+        "!! IMPORT WORKFLOW — follow every step or you WILL see duplicates !!"
+    );
+    println!(
+        "   Bitwarden's Import feature is purely ADDITIVE: it never dedupes"
+    );
+    println!(
+        "   against your existing vault. Skipping the Purge step below means"
+    );
+    println!(
+        "   the imported items land on top of what's already there, and every"
+    );
+    println!(
+        "   item you already had will appear twice in the Bitwarden UI."
+    );
+    println!();
+    println!(
+        "  1. Back up your current vault (keep the original export file)."
+    );
     println!("  2. Bitwarden web vault → Settings → My Account → Purge Vault.");
+    println!("     (This empties your vault. It is load-bearing.)");
     println!(
         "  3. Tools → Import Data → Bitwarden (json) → select {}.",
         output_path
@@ -187,8 +277,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default()
             .to_string_lossy()
     );
-    println!("  4. Review Bitwarden's Trash folder: any dedup loser or iCloud-dup");
-    println!("     is there, and you can restore items you disagree with.");
+    println!(
+        "  4. Do NOT also import the .trashed.json sidecar unless you"
+    );
+    println!(
+        "     specifically want to populate Bitwarden's Trash folder."
+    );
 
     Ok(())
 }
@@ -201,6 +295,68 @@ fn suffix_sibling(input: &Path, suffix: &str) -> PathBuf {
         .to_string_lossy()
         .to_string();
     parent.join(format!("{stem}{suffix}"))
+}
+
+/// Split the `items` array of `export` in place: non-trashed items stay
+/// in `export.items`; items carrying a non-null `deletedDate` are moved
+/// into a sibling JSON file that mirrors the export shape and can be
+/// imported separately if the operator wants to populate Bitwarden's
+/// Trash folder. Returns the count of trashed items written.
+///
+/// Bitwarden's JSON importer is inconsistent about the `deletedDate`
+/// field — some client versions put such items in Trash, others ignore
+/// it and import them as active. By stripping them from the main
+/// `items` array we remove that risk entirely: whatever Bitwarden
+/// does with `deletedDate`, the main import only ever sees living
+/// items, so the active view stays clean.
+fn split_items_to_sidecar(export: &mut Value, trashed_path: &Path) -> Result<usize, String> {
+    let Some(obj) = export.as_object_mut() else {
+        return Err("export is not a top-level JSON object".into());
+    };
+    let Some(Value::Array(arr)) = obj.get_mut("items") else {
+        return Err("export `items` field is not an array after dedup".into());
+    };
+    let all = std::mem::take(arr);
+    let mut living = Vec::with_capacity(all.len());
+    let mut trashed = Vec::new();
+    for item in all {
+        let is_trashed = item
+            .get("deletedDate")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        if is_trashed {
+            trashed.push(item);
+        } else {
+            living.push(item);
+        }
+    }
+    let trashed_count = trashed.len();
+    *arr = living;
+
+    // Only write the sidecar if we actually have something to put in
+    // it — avoids cluttering vault/ with empty files after a run with
+    // no dedup losers.
+    if trashed_count > 0 {
+        let mut trashed_export = export.clone();
+        if let Some(obj) = trashed_export.as_object_mut() {
+            obj.insert("items".to_string(), Value::Array(trashed));
+        }
+        let json = serde_json::to_string_pretty(&trashed_export)
+            .map_err(|e| format!("serializing trashed sidecar: {e}"))?;
+        write_sensitive_atomic(trashed_path, &json)
+            .map_err(|e| format!("writing {}: {e}", trashed_path.display()))?;
+    } else if trashed_path.exists() {
+        // No losers this run — remove a stale sidecar from a previous
+        // run so the operator never imports an outdated recovery
+        // file by mistake.
+        fs::remove_file(trashed_path).map_err(|e| {
+            format!(
+                "removing stale trash sidecar {}: {e}",
+                trashed_path.display()
+            )
+        })?;
+    }
+    Ok(trashed_count)
 }
 
 /// Resolve a path to a canonical identity for collision detection.

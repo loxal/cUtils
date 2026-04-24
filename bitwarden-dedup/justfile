@@ -2,16 +2,20 @@
 #
 # bitwarden-dedup — task runner
 #
-# Two binaries:
-#   * bitwarden-dedup   — deduplicate a real export into an import-ready file
-#   * bitwarden-redact  — produce a committable redacted replica of a real export
+# Three binaries:
+#   * bitwarden-dedup          — deduplicate a real export into an import-ready file
+#   * bitwarden-merge-icloud   — merge an Apple Passwords CSV into a Bitwarden JSON
+#   * bitwarden-redact         — produce a local reviewer-shareable redacted replica
+#                                 of a real export (NOT a committable repo artifact —
+#                                 output still carries vault-shape metadata and is
+#                                 gitignored)
 #
 # Default recipe (running `just`) prints the list.
 
 default:
     @just --list
 
-# Build both binaries in release mode.
+# Build all binaries in release mode.
 build:
     cargo build --release
 
@@ -35,6 +39,10 @@ dedup input='' output='' audit='' split_divergent_totps='':
             -name 'bitwarden_export_*.json' \
             ! -name '*.dedup.json' \
             ! -name '*.dedup.audit.json' \
+            ! -name '*.dedup.trashed.json' \
+            ! -name '*-with-icloud-credentials.json' \
+            ! -name '*-with-icloud-credentials.audit.json' \
+            ! -name '*-with-icloud-credentials.trashed.json' \
             2>/dev/null || true; } | sort | tail -1)
         if [[ -z "$input" ]]; then
             echo "error: no bitwarden_export_*.json file in vault/" >&2
@@ -51,8 +59,7 @@ dedup input='' output='' audit='' split_divergent_totps='':
 
 # Same as `just dedup` but with the safer --split-divergent-totps mode:
 # items that differ only in login.totp stay as separate living items
-# instead of auto-collapsing by revisionDate. Use this when the item-
-# level revisionDate heuristic cannot be trusted for the current vault.
+# instead of auto-collapsing by revisionDate.
 dedup-split-totps input='' output='' audit='':
     @just dedup "{{input}}" "{{output}}" "{{audit}}" true
 
@@ -60,9 +67,9 @@ dedup-split-totps input='' output='' audit='':
 # Without arguments: picks the newest `bitwarden_export_*.json` and the
 # newest `*-Passwords.csv` (or `Passwords*.csv`) in vault/. Writes
 # `<bitwarden_stem>-with-icloud-credentials.json` + audit next to the
-# Bitwarden input. Nothing is ever removed — dedup losers get
-# `deletedDate` set so they surface in Bitwarden's Trash folder after
-# import and can be recovered by hand.
+# Bitwarden input. Dedup losers land in a sidecar
+# `<bitwarden_stem>-with-icloud-credentials.trashed.json` — NOT
+# auto-imported; offline recovery copy.
 merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' split_divergent_totps='':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -77,8 +84,10 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
             -name 'bitwarden_export_*.json' \
             ! -name '*.dedup.json' \
             ! -name '*.dedup.audit.json' \
+            ! -name '*.dedup.trashed.json' \
             ! -name '*-with-icloud-credentials.json' \
             ! -name '*-with-icloud-credentials.audit.json' \
+            ! -name '*-with-icloud-credentials.trashed.json' \
             2>/dev/null || true; } | sort | tail -1)
         if [[ -z "$bw" ]]; then
             echo "error: no bitwarden_export_*.json file in vault/" >&2
@@ -87,14 +96,29 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
         echo "using latest Bitwarden export: $bw" >&2
     fi
     if [[ -z "$csv" ]]; then
-        csv=$({ find vault -maxdepth 1 -type f \
+        # Apple-Passwords CSV filenames are NOT guaranteed to encode
+        # chronology the way Bitwarden export names do, so a lexical
+        # sort is unsafe here. Require exactly one match; if there are
+        # several, list them and make the operator pick explicitly via
+        # `icloud=<path>`.
+        matches=$(find vault -maxdepth 1 -type f \
             \( -name '*-Passwords.csv' -o -name '*-passwords.csv' -o -name 'Passwords*.csv' \) \
-            2>/dev/null || true; } | sort | tail -1)
-        if [[ -z "$csv" ]]; then
+            2>/dev/null || true)
+        count=0
+        if [[ -n "$matches" ]]; then
+            count=$(printf '%s\n' "$matches" | wc -l | tr -d ' ')
+        fi
+        if [[ "$count" -eq 0 ]]; then
             echo "error: no Apple Passwords CSV in vault/ (expected e.g. '2026-04-23-Passwords.csv')" >&2
             exit 1
         fi
-        echo "using latest iCloud CSV:       $csv" >&2
+        if [[ "$count" -gt 1 ]]; then
+            echo "error: multiple Apple Passwords CSVs in vault/ — pass icloud=<path> to pick one:" >&2
+            printf '%s\n' "$matches" | sed 's/^/  - /' >&2
+            exit 1
+        fi
+        csv="$matches"
+        echo "using iCloud CSV:              $csv" >&2
     fi
     split_flag=""
     case "{{split_divergent_totps}}" in
@@ -106,9 +130,7 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
         {{ if audit != "" { "--audit " + audit } else { "" } }}
 
 # Same as merge-with-icloud-credentials-csv but with the safer
-# --split-divergent-totps mode. Items that differ only in login.totp
-# stay as separate living items (you review and merge by hand later)
-# rather than auto-collapsing with a newest-by-revisionDate pick.
+# --split-divergent-totps mode.
 merge-with-icloud-credentials-csv-split-totps bitwarden='' icloud='' output='' audit='':
     @just merge-with-icloud-credentials-csv "{{bitwarden}}" "{{icloud}}" "{{output}}" "{{audit}}" true
 
@@ -118,28 +140,19 @@ example:
     ./target/release/bitwarden-dedup --input examples/bitwarden_export_20260411172632.json --output /tmp/example.dedup.json --audit /tmp/example.dedup.audit.json
 
 # Produce a local redacted replica of a real vault export. The output is
-# safe to share with a reviewer: passwords, TOTP seeds, FIDO2 credentials,
-# usernames, URIs, notes, custom field values, item ids, folder ids,
-# organization metadata, collection ids, and all timestamps are
-# synthesized or nulled. Still DO NOT commit this output — the redactor
-# output is gitignored and MUST be written to `/tmp/` or `vault/`, never
-# to `examples/`. Example: `just redact vault/bitwarden_export.json /tmp/redacted.json`
+# safe to share with a reviewer but is still sensitive enough that it is
+# gitignored and MUST be written to `/tmp/` or `vault/`, never to
+# `examples/`. Example: `just redact vault/bitwarden_export.json /tmp/redacted.json`
 redact input output:
     cargo run --release --bin bitwarden-redact -- --input {{input}} --output {{output}}
 
 # Regenerate the committed example fixture at examples/example_export.json.
-# The fixture is constructed by tests/fixture.rs::build_curated_fixture()
-# and contains NO data originating from any real vault.
 regenerate-example:
     cargo test --test fixture regenerate_example_fixture -- --ignored --nocapture
 
 # Run the full test suite (lib + both binaries + integration + leak-guard).
 test:
     cargo test
-
-# Run only the leak-guard on the committed example fixture.
-leak-guard:
-    cargo test --test fixture example_fixture_no_leaked_strings
 
 # Format and lint.
 check:
