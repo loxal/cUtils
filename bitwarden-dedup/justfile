@@ -134,6 +134,24 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
 merge-with-icloud-credentials-csv-split-totps bitwarden='' icloud='' output='' audit='':
     @just merge-with-icloud-credentials-csv "{{bitwarden}}" "{{icloud}}" "{{output}}" "{{audit}}" true
 
+# Move every item in a Bitwarden export into a single folder. Replaces the
+# export's `folders` array with one folder of the given name and rewrites every
+# item's `folderId` to point at it. Auto-discovers the latest
+# `bitwarden_export_*.json` in vault/ when INPUT is omitted. OUTPUT defaults to
+# `<input_stem>.in-folder-<folder>.json` next to the input. The new folder gets
+# a fresh v4 UUID; Bitwarden's import re-resolves it by name on the way in, so
+# the generated UUID only needs to satisfy the export schema.
+#
+# Examples:
+#   just move-to-folder                       # everything → "main"
+#   just move-to-folder archive               # everything → "archive"
+#   just move-to-folder main vault/foo.json
+move-to-folder folder='main' input='' output='':
+    cargo run --release --bin bitwarden-move-to-folder -- \
+        --folder "{{folder}}" \
+        {{ if input != "" { "--input " + input } else { "" } }} \
+        {{ if output != "" { "--output " + output } else { "" } }}
+
 # Run the dedup tool against the committed synthetic example fixture.
 # Useful for smoke-testing a build without needing a real vault export.
 example:
