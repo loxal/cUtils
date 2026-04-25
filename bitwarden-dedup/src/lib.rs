@@ -28,6 +28,7 @@ mod icloud;
 pub mod io_util;
 mod json_util;
 mod key;
+pub mod live_vault;
 mod merge;
 mod pipeline;
 mod time_util;

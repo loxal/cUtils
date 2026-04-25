@@ -173,15 +173,23 @@ fn discover_latest_vault_export(dir: &Path) -> Result<PathBuf, String> {
     })
 }
 
-/// A file is a "primary" vault export if it matches `bitwarden_export_*.json`
-/// and does NOT match any of the sidecar shapes the other binaries
-/// (including this one) produce. That prevents re-runs from re-consuming
-/// their own output.
+/// A file is a "primary" vault export if it matches one of the
+/// recognized export prefixes and does NOT match any of the sidecar
+/// shapes the other binaries (including this one) produce.
+///
+/// Recognized prefixes:
+///   - `bitwarden_export_*.json`            — `bw export --format json`
+///   - `bitwarden_decrypted-export_*.json`  — `just backup-vault-decrypted`
 fn is_primary_vault_export(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    if !name.starts_with("bitwarden_export_") || !name.ends_with(".json") {
+    if !name.ends_with(".json") {
+        return false;
+    }
+    let has_known_prefix = name.starts_with("bitwarden_export_")
+        || name.starts_with("bitwarden_decrypted-export_");
+    if !has_known_prefix {
         return false;
     }
     const EXCLUDED_SUFFIXES: &[&str] = &[
@@ -400,6 +408,27 @@ mod tests {
     fn primary_export_accepts_bare_timestamped_name() {
         assert!(is_primary_vault_export(Path::new(
             "vault/bitwarden_export_20260101000000.json"
+        )));
+    }
+
+    #[test]
+    fn primary_export_accepts_decrypted_export_prefix() {
+        // `just backup-vault-decrypted` produces this shape — must be
+        // recognized as a primary export.
+        assert!(is_primary_vault_export(Path::new(
+            "vault/bitwarden_decrypted-export_20260101000000.json"
+        )));
+        assert!(is_primary_vault_export(Path::new(
+            "vault/bitwarden_decrypted-export_20260101000000123.json"
+        )));
+    }
+
+    #[test]
+    fn primary_export_rejects_encrypted_export_prefix() {
+        // `just backup-vault-encrypted` writes the raw `/api/sync`
+        // body — that's encrypted, not a dedup input.
+        assert!(!is_primary_vault_export(Path::new(
+            "vault/bitwarden_encrypted-export_20260101000000.json"
         )));
     }
 

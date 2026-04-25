@@ -2,13 +2,31 @@
 #
 # bitwarden-dedup — task runner
 #
-# Three binaries:
-#   * bitwarden-dedup          — deduplicate a real export into an import-ready file
-#   * bitwarden-merge-icloud   — merge an Apple Passwords CSV into a Bitwarden JSON
-#   * bitwarden-redact         — produce a local reviewer-shareable redacted replica
-#                                 of a real export (NOT a committable repo artifact —
-#                                 output still carries vault-shape metadata and is
-#                                 gitignored)
+# Six binaries:
+#
+# JSON-path tools (offline; consume a Bitwarden JSON export):
+#   * bitwarden-dedup                 — deduplicate a real export into an
+#                                       import-ready file
+#   * bitwarden-merge-icloud          — merge an Apple Passwords CSV into a
+#                                       Bitwarden JSON
+#   * bitwarden-move-to-folder        — move every item into a single folder,
+#                                       leaving the export's other shape intact
+#   * bitwarden-redact                — produce a local reviewer-shareable
+#                                       redacted replica of a real export (NOT
+#                                       committable; output still carries
+#                                       vault-shape metadata and is gitignored)
+#
+# REST-API tools (talk to bitwarden.com / .eu over rustls; require the personal
+# API key in vault/bitwarden_api_key.env):
+#   * bitwarden-backup-vault-encrypted — encrypted backup, no master password.
+#                                        Writes the raw /api/sync response to
+#                                        vault/bitwarden_encrypted-export_<ts>.json.
+#   * bitwarden-backup-vault-decrypted — decrypted backup, prompts for master
+#                                        password. Writes a `just dedup`-ready
+#                                        JSON to vault/bitwarden_decrypted-export_<ts>.json.
+#                                        Crypto correctness gated on
+#                                        tests/crypto_vectors.rs (byte-locked
+#                                        against bitwarden/sdk-internal).
 #
 # Default recipe (running `just`) prints the list.
 
@@ -20,11 +38,14 @@ build:
     cargo build --release
 
 # Deduplicate a Bitwarden vault export. Without arguments, auto-
-# discovers the latest `bitwarden_export_<timestamp>.json` in vault/
-# by lexical sort on the filename (zero-padded YYYYMMDDHHMMSS
-# timestamps sort chronologically). Pass INPUT to override and point
-# at a specific file. OUTPUT / AUDIT let you override the default
-# sibling paths (point at /tmp/ or vault/, never at examples/).
+# discovers the latest export in vault/ by lexical sort on filename
+# (zero-padded UTC timestamps sort chronologically). Two filename
+# shapes are accepted:
+#   bitwarden_export_<ts>.json            — `bw export --format json`
+#   bitwarden_decrypted-export_<ts>.json  — `just backup-vault-decrypted`
+# Pass INPUT to override and point at a specific file. OUTPUT / AUDIT
+# let you override the default sibling paths (point at /tmp/ or vault/,
+# never at examples/).
 dedup input='' output='' audit='' split_divergent_totps='':
     #!/usr/bin/env bash
     set -euo pipefail
@@ -33,10 +54,11 @@ dedup input='' output='' audit='' split_divergent_totps='':
         if [[ ! -d vault ]]; then
             echo "error: no INPUT given and vault/ directory does not exist" >&2
             echo "hint: mkdir -p vault && mv ~/Downloads/bitwarden_export_*.json vault/" >&2
+            echo "      (or run `just backup-vault-decrypted` to write one directly)" >&2
             exit 1
         fi
         input=$({ find vault -maxdepth 1 -type f \
-            -name 'bitwarden_export_*.json' \
+            \( -name 'bitwarden_export_*.json' -o -name 'bitwarden_decrypted-export_*.json' \) \
             ! -name '*.dedup.json' \
             ! -name '*.dedup.audit.json' \
             ! -name '*.dedup.trashed.json' \
@@ -45,8 +67,9 @@ dedup input='' output='' audit='' split_divergent_totps='':
             ! -name '*-with-icloud-credentials.trashed.json' \
             2>/dev/null || true; } | sort | tail -1)
         if [[ -z "$input" ]]; then
-            echo "error: no bitwarden_export_*.json file in vault/" >&2
+            echo "error: no exportable JSON in vault/" >&2
             echo "hint: mv ~/Downloads/bitwarden_export_*.json vault/" >&2
+            echo "      or run `just backup-vault-decrypted` to write one." >&2
             exit 1
         fi
         echo "using latest export: $input" >&2
@@ -55,7 +78,7 @@ dedup input='' output='' audit='' split_divergent_totps='':
     case "{{split_divergent_totps}}" in
         1|true|yes|on) split_flag="--split-divergent-totps" ;;
     esac
-    cargo run --release --bin bitwarden-dedup -- --input "$input" $split_flag {{ if output != "" { "--output " + output } else { "" } }} {{ if audit != "" { "--audit " + audit } else { "" } }}
+    cargo run --locked --release --bin bitwarden-dedup -- --input "$input" $split_flag {{ if output != "" { "--output " + output } else { "" } }} {{ if audit != "" { "--audit " + audit } else { "" } }}
 
 # Same as `just dedup` but with the safer --split-divergent-totps mode:
 # items that differ only in login.totp stay as separate living items
@@ -64,8 +87,9 @@ dedup-split-totps input='' output='' audit='':
     @just dedup "{{input}}" "{{output}}" "{{audit}}" true
 
 # Merge an Apple Passwords CSV export into a Bitwarden JSON vault.
-# Without arguments: picks the newest `bitwarden_export_*.json` and the
-# newest `*-Passwords.csv` (or `Passwords*.csv`) in vault/. Writes
+# Without arguments: picks the newest `bitwarden_export_*.json` or
+# `bitwarden_decrypted-export_*.json` and the newest `*-Passwords.csv`
+# (or `Passwords*.csv`) in vault/. Writes
 # `<bitwarden_stem>-with-icloud-credentials.json` + audit next to the
 # Bitwarden input. Dedup losers land in a sidecar
 # `<bitwarden_stem>-with-icloud-credentials.trashed.json` — NOT
@@ -81,7 +105,7 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
             exit 1
         fi
         bw=$({ find vault -maxdepth 1 -type f \
-            -name 'bitwarden_export_*.json' \
+            \( -name 'bitwarden_export_*.json' -o -name 'bitwarden_decrypted-export_*.json' \) \
             ! -name '*.dedup.json' \
             ! -name '*.dedup.audit.json' \
             ! -name '*.dedup.trashed.json' \
@@ -90,7 +114,7 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
             ! -name '*-with-icloud-credentials.trashed.json' \
             2>/dev/null || true; } | sort | tail -1)
         if [[ -z "$bw" ]]; then
-            echo "error: no bitwarden_export_*.json file in vault/" >&2
+            echo "error: no exportable JSON in vault/" >&2
             exit 1
         fi
         echo "using latest Bitwarden export: $bw" >&2
@@ -124,7 +148,7 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
     case "{{split_divergent_totps}}" in
         1|true|yes|on) split_flag="--split-divergent-totps" ;;
     esac
-    cargo run --release --bin bitwarden-merge-icloud -- \
+    cargo run --locked --release --bin bitwarden-merge-icloud -- \
         --bitwarden "$bw" --icloud "$csv" $split_flag \
         {{ if output != "" { "--output " + output } else { "" } }} \
         {{ if audit != "" { "--audit " + audit } else { "" } }}
@@ -147,7 +171,7 @@ merge-with-icloud-credentials-csv-split-totps bitwarden='' icloud='' output='' a
 #   just move-to-folder archive               # everything → "archive"
 #   just move-to-folder main vault/foo.json
 move-to-folder folder='main' input='' output='':
-    cargo run --release --bin bitwarden-move-to-folder -- \
+    cargo run --locked --release --bin bitwarden-move-to-folder -- \
         --folder "{{folder}}" \
         {{ if input != "" { "--input " + input } else { "" } }} \
         {{ if output != "" { "--output " + output } else { "" } }}
@@ -162,7 +186,49 @@ example:
 # gitignored and MUST be written to `/tmp/` or `vault/`, never to
 # `examples/`. Example: `just redact vault/bitwarden_export.json /tmp/redacted.json`
 redact input output:
-    cargo run --release --bin bitwarden-redact -- --input {{input}} --output {{output}}
+    cargo run --locked --release --bin bitwarden-redact -- --input {{input}} --output {{output}}
+
+# Encrypted backup of the live Bitwarden vault via the REST API.
+#
+# Authenticates with the personal API key in
+# `vault/bitwarden_api_key.env`, fetches `/api/sync`, and writes the
+# raw encrypted response to `vault/bitwarden_sync_<UTC-ts>.json`
+# (mode 0o600, gitignored). No master password is requested or used;
+# the snapshot is encrypted end-to-end and not decryptable by this
+# tool. Cron-friendly: no interactive prompt.
+#
+# Prerequisites:
+# - vault/bitwarden_api_key.env populated with BW_CLIENT_ID,
+#   BW_CLIENT_SECRET, BW_REGION (us|eu).
+#
+# For a `just dedup`-ready JSON export, use `just backup-vault-decrypted`.
+backup-vault-encrypted:
+    cargo run --locked --release --bin bitwarden-backup-vault-encrypted
+
+# Decrypted backup of the live Bitwarden vault via the REST API.
+#
+# Same network path as `backup-vault-encrypted`, plus:
+#   - Prompts for the master password (no echo, never logged).
+#   - Derives the master key (Argon2id or PBKDF2 per the account
+#     KDF settings on profile in /api/sync).
+#   - Decrypts the user key + every cipher field.
+#   - Writes a `just dedup`-ready JSON-export-shape file to
+#     `vault/bitwarden_export_<UTC-ts>.json` (mode 0o600, gitignored).
+#
+# **Output is plaintext** — passwords, TOTP seeds, FIDO2 credentials
+# in the clear. Same risk profile as `bw export --format json`. The
+# vault/ directory is the only at-rest protection.
+#
+# Crypto correctness is gated on tests/crypto_vectors.rs (byte-locked
+# vectors lifted from bitwarden/sdk-internal). If those tests pass,
+# this binary decrypts identically to the official Bitwarden client.
+#
+# Prerequisites:
+# - vault/bitwarden_api_key.env populated with BW_CLIENT_ID,
+#   BW_CLIENT_SECRET, BW_REGION (us|eu).
+# - The master password ready to type at the prompt.
+backup-vault-decrypted:
+    cargo run --locked --release --bin bitwarden-backup-vault-decrypted
 
 # Regenerate the committed example fixture at examples/example_export.json.
 regenerate-example:

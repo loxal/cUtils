@@ -13,14 +13,35 @@ FIDO2 credentials, notes, custom fields, and password history.
 > The sidecar is your offline recovery copy; import it separately
 > only if you want to populate Bitwarden's Trash folder.
 
-> **100 % offline.** This tool runs entirely on your machine. It makes
-> **zero network connections** — no HTTP calls, no DNS lookups, no
-> telemetry, no update checks, no cloud APIs. Your vault data never
-> leaves your filesystem. The only I/O is reading the export JSON from
-> disk, processing it in memory, and writing the results back to disk.
-> This is verifiable: the crate depends only on `clap` (CLI parsing) and
-> `serde_json` (JSON parsing) — neither of which provides network
-> capability, and neither does any transitive dependency in `Cargo.lock`.
+> **JSON-path tools are 100 % offline.** The original four binaries
+> (`bitwarden-dedup`, `bitwarden-merge-icloud`, `bitwarden-redact`,
+> `bitwarden-move-to-folder`) run entirely on your machine, with zero
+> network calls, telemetry, update checks, or cloud APIs. They read a
+> JSON export, process it in memory, and write the results back to
+> disk. Use these whenever you can.
+>
+> **`backup-vault-encrypted` and `backup-vault-decrypted` talk to Bitwarden.**
+> Two REST-API binaries authenticate against `identity.bitwarden.com`
+> / `.eu` with the personal API key and fetch `/api/sync` over
+> rustls + webpki-roots:
+>
+> - **`just backup-vault-encrypted`** — writes the raw encrypted
+>   `/api/sync` body to `vault/bitwarden_encrypted-export_<UTC-ts>.json`
+>   (0o600, gitignored). No master password requested; cron-friendly.
+>   An independent encrypted backup that doesn't depend on Bitwarden's
+>   Node.js CLI.
+> - **`just backup-vault-decrypted`** — same network path, plus
+>   prompts for the master password and decrypts every cipher field
+>   into `vault/bitwarden_decrypted-export_<UTC-ts>.json` (same shape
+>   `bw export --format json` emits). Directly drop-in for `just dedup`.
+>   The crypto layer is byte-locked against `bitwarden/sdk-internal`
+>   via `tests/crypto_vectors.rs`; if the vectors pass, this binary
+>   decrypts identically to the official Bitwarden client.
+>
+> The decrypted output is **plaintext-sensitive** (passwords, TOTP
+> seeds, FIDO2 material in the clear) — same risk profile as
+> `bw export --format json`. Treat accordingly: never share, delete
+> after use, never commit.
 
 ## Quick start
 

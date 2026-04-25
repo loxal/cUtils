@@ -1,6 +1,6 @@
 [package]
 name = "bitwarden-dedup"
-version = "0.1.0"
+version = "0.9.0"
 edition = "2024"
 description = "Deduplicate a Bitwarden JSON vault export into an import-ready file while preserving TOTP secrets, FIDO2 credentials, and URI lists"
 license = "MIT"
@@ -8,4 +8,57 @@ publish = false
 
 [dependencies]
 clap = { version = "4.5.53", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.149"
+
+# Phase 1a (api-dedup) — REST transport. Existing binaries remain
+# sync-only; only the api-dedup binary's main is async.
+#
+# Feature audit (2026-04-25, round-3): we don't decode JSON via
+# reqwest's `.json()` extractor (snapshot.rs uses serde_json directly
+# on the raw response body), so the `json` feature is dropped. We're
+# on a current_thread runtime in production, so `rt-multi-thread` is
+# tests-only.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+    "http2",
+] }
+tokio = { version = "1", features = [
+    "rt",
+    "macros",
+    "io-util",
+    "net",
+    "time",
+    "sync",
+] }
+dotenvy = "0.15.7"
+
+# Phase 1b — crypto stack for `bitwarden-backup-vault-decrypted`.
+# Audited RustCrypto crates only. No `aes-gcm` (we only handle
+# EncString type 2 = AES-CBC + HMAC-SHA256; type 7 v2 ciphers are
+# refused at parse time per audit invariant L.0 #6). No `rand`
+# (this binary is decrypt-only — never generates IVs).
+#
+# Crate pins corrected per the 2026-04-25 audit: pbkdf2 0.12
+# (0.13 stable doesn't exist), hmac 0.12 (0.13 stable doesn't
+# exist), getrandom not added.
+argon2 = "0.5"
+pbkdf2 = "0.12"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+aes = "0.8"
+cbc = "0.1"
+subtle = "2.6"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+secrecy = "0.10"
+base64 = "0.22"
+rpassword = "7.4"
+
+[dev-dependencies]
+# wiremock provides a hermetic HTTP mock server for the auth + sync
+# integration tests. Pinned >= 0.6 for reqwest 0.12 compatibility.
+wiremock = "0.6"
+# Multi-threaded runtime is wiremock's default expectation for #[tokio::test];
+# production code uses current_thread.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }

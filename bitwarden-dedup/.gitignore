@@ -6,9 +6,16 @@ target/
 
 # Secrets — NEVER commit Bitwarden vault exports or derived files.
 # These files contain plaintext passwords, TOTP seeds, and passkey data.
-bitwarden_export_*.json
-*.dedup.json
-*.dedup.audit.json
+bitwarden_export_*.json                    # `bw export --format json` output
+bitwarden_decrypted-export_*.json          # `just backup-vault-decrypted` output
+bitwarden_encrypted-export_*.json          # `just backup-vault-encrypted` output
+bitwarden_sync_*.json                      # legacy `bw export` / pre-rename snapshots
+*.dedup.json                               # `just dedup` deduplicated output
+*.dedup.audit.json                         # `just dedup` per-removal audit
+*.dedup.trashed.json                       # `just dedup` losers sidecar
+*-with-icloud-credentials.json             # `just merge-with-icloud-credentials-csv` merged output
+*-with-icloud-credentials.audit.json       # … its audit
+*-with-icloud-credentials.trashed.json     # … its losers sidecar
 # Local redactor output (bitwarden-redact). The redacted replica still
 # contains vault-shape metadata (counts, per-item URI counts, dates) and
 # is intended for local reviewer sharing, not commit.

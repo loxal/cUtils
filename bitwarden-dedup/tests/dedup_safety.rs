@@ -671,3 +671,202 @@ fn folder_dedup_tolerates_missing_or_null_folders_field() {
     let s = dedup_export(&mut null_folders).unwrap();
     assert_eq!(s.folders_deduplicated, 0);
 }
+
+// -----------------------------------------------------------------------
+// Timestamp preservation
+// -----------------------------------------------------------------------
+//
+// The dedup tool must NEVER mutate `creationDate` or `revisionDate` on
+// any item — survivor or loser. The only timestamp the tool is allowed
+// to write is `deletedDate`, and only on items that didn't already
+// carry one (the dedup losers, so Bitwarden's importer surfaces them in
+// the Trash folder). Any other timestamp drift would cause Bitwarden's
+// import view to falsely show items as "recently updated" and erase
+// real history (e.g. how long ago a password was last rotated).
+
+#[test]
+fn survivor_keeps_original_creation_and_revision_dates_byte_for_byte() {
+    let mut items = vec![
+        json!({
+            "id": "winner",
+            "type": 1,
+            "name": "Gmail",
+            "notes": "longer note that makes this the survivor too",
+            "favorite": true,
+            "creationDate": "2020-03-15T08:11:42Z",
+            "revisionDate": "2026-01-09T17:42:08Z",
+            "login": {
+                "username": "a@example.test",
+                "password": "shared",
+                "totp": "JBSWY3DPEHPK3PXP",
+                "uris": [{"uri": "https://gmail.com", "match": null}],
+            },
+        }),
+        json!({
+            "id": "loser",
+            "type": 1,
+            "name": "Gmail",
+            "creationDate": "2019-01-01T00:00:00Z",
+            "revisionDate": "2025-06-01T00:00:00Z",
+            "login": {
+                "username": "a@example.test",
+                "password": "shared",
+                "uris": [{"uri": "https://mail.google.com", "match": null}],
+            },
+        }),
+    ];
+    let _stats = dedup_items(&mut items);
+
+    let winner = items.iter().find(|i| i["id"] == "winner").unwrap();
+    assert_eq!(
+        winner["creationDate"].as_str(),
+        Some("2020-03-15T08:11:42Z"),
+        "survivor's creationDate must be preserved byte-for-byte"
+    );
+    assert_eq!(
+        winner["revisionDate"].as_str(),
+        Some("2026-01-09T17:42:08Z"),
+        "survivor's revisionDate must be preserved byte-for-byte even though \
+         the survivor was patched (notes/URIs/TOTP merged in)"
+    );
+    // And the survivor must NOT acquire a deletedDate just because items
+    // around it got trashed.
+    assert!(winner["deletedDate"].is_null());
+}
+
+#[test]
+fn trashed_loser_keeps_original_creation_and_revision_dates() {
+    let mut items = vec![
+        json!({
+            "id": "winner",
+            "type": 1, "name": "Site",
+            "creationDate": "2020-01-01T00:00:00Z",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"username": "u", "password": "p"},
+        }),
+        json!({
+            "id": "loser",
+            "type": 1, "name": "Site",
+            "creationDate": "2018-08-08T08:08:08Z",
+            "revisionDate": "2024-04-04T04:04:04Z",
+            "login": {"username": "u", "password": "p"},
+        }),
+    ];
+    dedup_items(&mut items);
+
+    let loser = items.iter().find(|i| i["id"] == "loser").unwrap();
+    assert_eq!(
+        loser["creationDate"].as_str(),
+        Some("2018-08-08T08:08:08Z"),
+        "trashed loser's creationDate must NOT be overwritten — only deletedDate is added"
+    );
+    assert_eq!(
+        loser["revisionDate"].as_str(),
+        Some("2024-04-04T04:04:04Z"),
+        "trashed loser's revisionDate must NOT be overwritten"
+    );
+    assert!(
+        loser["deletedDate"].as_str().is_some_and(|s| !s.is_empty()),
+        "loser must carry the dedup-stamped deletedDate"
+    );
+}
+
+#[test]
+fn no_dedup_means_no_timestamp_drift_anywhere() {
+    // When the input has zero duplicate groups, every item must come
+    // out with byte-identical creationDate, revisionDate, deletedDate.
+    let original = vec![
+        json!({
+            "id": "a",
+            "type": 1, "name": "Alpha",
+            "creationDate": "2021-01-01T00:00:00Z",
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "login": {"username": "u1", "password": "p1"},
+        }),
+        json!({
+            "id": "b",
+            "type": 1, "name": "Beta",
+            "creationDate": "2022-02-02T00:00:00Z",
+            "revisionDate": "2026-02-02T00:00:00Z",
+            "login": {"username": "u2", "password": "p2"},
+        }),
+        json!({
+            "id": "c-pretrashed",
+            "type": 1, "name": "Gamma",
+            "creationDate": "2023-03-03T00:00:00Z",
+            "revisionDate": "2023-04-04T00:00:00Z",
+            "deletedDate": "2023-05-05T00:00:00Z",
+            "login": {"username": "u3", "password": "p3"},
+        }),
+    ];
+    let mut items = original.clone();
+    let stats = dedup_items(&mut items);
+    assert_eq!(stats.groups, 0);
+
+    for src in &original {
+        let id = src["id"].as_str().unwrap();
+        let out = items.iter().find(|i| i["id"] == id).unwrap();
+        assert_eq!(
+            out["creationDate"], src["creationDate"],
+            "creationDate drifted on item {id}"
+        );
+        assert_eq!(
+            out["revisionDate"], src["revisionDate"],
+            "revisionDate drifted on item {id}"
+        );
+        assert_eq!(
+            out["deletedDate"], src["deletedDate"],
+            "deletedDate drifted on item {id} (a non-duplicate item must \
+             never gain or lose a deletedDate)"
+        );
+    }
+}
+
+#[test]
+fn fixture_round_trip_preserves_creation_and_revision_for_every_item() {
+    // End-to-end check on the committed example fixture: load it, run
+    // dedup, and assert that for every item that came back with the
+    // same id, creationDate and revisionDate are byte-identical to the
+    // input. This is the regression guard that would have caught a bug
+    // where, say, `apply_survivor_patch` accidentally re-stamped
+    // revisionDate after merging notes or URIs.
+    let fixture_path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/bitwarden_export_20260411172632.json");
+    let text = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", fixture_path.display()));
+    let original: Value = serde_json::from_str(&text).unwrap();
+    let original_items = original["items"].as_array().unwrap().clone();
+
+    let mut export = original.clone();
+    let _stats = dedup_export(&mut export).unwrap();
+    let dedup_items_arr = export["items"].as_array().unwrap();
+
+    let src_by_id: std::collections::HashMap<String, &Value> = original_items
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| (s.to_string(), i)))
+        .collect();
+
+    let mut creation_diffs = 0usize;
+    let mut revision_diffs = 0usize;
+    for it in dedup_items_arr {
+        let Some(id) = it["id"].as_str() else { continue };
+        let Some(src) = src_by_id.get(id) else { continue };
+        if it["creationDate"] != src["creationDate"] {
+            creation_diffs += 1;
+            eprintln!(
+                "creationDate drift on {id}: {} -> {}",
+                src["creationDate"], it["creationDate"]
+            );
+        }
+        if it["revisionDate"] != src["revisionDate"] {
+            revision_diffs += 1;
+            eprintln!(
+                "revisionDate drift on {id}: {} -> {}",
+                src["revisionDate"], it["revisionDate"]
+            );
+        }
+    }
+    assert_eq!(creation_diffs, 0, "creationDate must never be modified");
+    assert_eq!(revision_diffs, 0, "revisionDate must never be modified");
+}
