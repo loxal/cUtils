@@ -35,8 +35,10 @@
 //! 7. **Folder dedup** — collapse same-name folders in the top-level
 //!    `folders` array and remap every item's `folderId` to the
 //!    surviving folder. Runs in [`dedup_export`] before items are
-//!    handed to the four item-level passes above so divergent-folder
-//!    notes only fire for genuinely different folders.
+//!    handed to the six item-level passes above (strict login,
+//!    empty-password login, secure note, SSH key, card, identity)
+//!    so divergent-folder notes only fire for genuinely different
+//!    folders.
 //!
 //! **Survivor selection** is deterministic: longer `passwordHistory` wins
 //! (captures more rotation history), then newer `revisionDate`, then newer

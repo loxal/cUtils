@@ -313,9 +313,13 @@ fn bitwarden_merge_icloud_audit_json_has_all_documented_fields() {
     let output = dir.join("merged.json");
     let audit = dir.join("merged.audit.json");
 
-    // Bitwarden side: one empty-pw stub for acme. CSV side: another
-    // empty-pw row for the same domain. With the flag set, they
-    // collapse via the empty-password pass.
+    // Bitwarden side: an empty-pw stub for acme that the CSV row
+    // collapses against, plus a card duplicate pair and an identity
+    // duplicate pair. The card and identity passes always run by
+    // default (no opt-in flag), so the merge binary must report
+    // non-zero `card_groups` / `identity_groups` in its audit JSON.
+    // Apple's Passwords CSV does not carry cards or identities, so
+    // the duplicates live entirely on the Bitwarden side.
     let bw = json!({
         "folders": [],
         "items": [
@@ -324,7 +328,43 @@ fn bitwarden_merge_icloud_audit_json_has_all_documented_fields() {
                 "revisionDate": "2026-01-01T00:00:00Z",
                 "login": {"username": "u@acme.example.test", "password": "",
                     "uris": [{"uri": "https://acme.example.test/"}]}
-            }
+            },
+            // card duplicate (synthetic — never a real PAN)
+            {
+                "id": "c1", "type": 3, "name": "TestCard",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "card": {
+                    "cardholderName": "Test User", "brand": "Visa",
+                    "number": "0000000000000000", "expMonth": "12",
+                    "expYear": "2099", "code": "000"
+                }
+            },
+            {
+                "id": "c2", "type": 3, "name": "TestCard",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "card": {
+                    "cardholderName": "Test User", "brand": "Visa",
+                    "number": "0000000000000000", "expMonth": "12",
+                    "expYear": "2099", "code": "000"
+                }
+            },
+            // identity duplicate
+            {
+                "id": "i1", "type": 4, "name": "TestIdentity",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "identity": {
+                    "firstName": "Test", "lastName": "User",
+                    "email": "user@example.test"
+                }
+            },
+            {
+                "id": "i2", "type": 4, "name": "TestIdentity",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "identity": {
+                    "firstName": "Test", "lastName": "User",
+                    "email": "user@example.test"
+                }
+            },
         ]
     });
     std::fs::write(&bw_input, bw.to_string()).unwrap();
@@ -406,6 +446,27 @@ fn bitwarden_merge_icloud_audit_json_has_all_documented_fields() {
     assert_eq!(audit_doc["empty_password_groups"], 1);
     assert_eq!(audit_doc["empty_password_trashed"], 1);
     assert_eq!(audit_doc["skipped_from_dedup"], audit_doc["strict_pass_skipped"]);
+
+    // Card and identity passes ran on the merged set and collapsed
+    // their respective Bitwarden-side duplicates. Regression guard:
+    // a refactor that forgot to call `dedup_cards` / `dedup_identities`
+    // through the merge code path would silently zero these out.
+    assert_eq!(audit_doc["card_groups"], 1);
+    assert_eq!(audit_doc["identity_groups"], 1);
+
+    // Per-entry shape: the merge binary's audit must label its
+    // card/identity drops with the expected `item_kind`.
+    let entries = audit_doc["entries"].as_array().unwrap();
+    let card_entries: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e["item_kind"] == "card")
+        .collect();
+    assert_eq!(card_entries.len(), 1, "expected one trashed card from the merge fixture");
+    let identity_entries: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e["item_kind"] == "identity")
+        .collect();
+    assert_eq!(identity_entries.len(), 1);
 
     cleanup(&dir);
 }
