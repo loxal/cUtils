@@ -3,17 +3,32 @@
 //! **"Which item survives, and what's the audit trail?"** — pipeline
 //! orchestration.
 //!
-//! The dedup pipeline runs in four passes:
+//! The dedup pipeline runs in five passes (the empty-password login
+//! pass is opt-in via [`DedupConfig::collapse_empty_passwords`]):
 //!
-//! 1. Group items by [`crate::key::dedup_key`]; skip items that fail
-//!    [`crate::key::skip_from_dedup`].
-//! 2. For each group of size > 1, pick a survivor and compute the merged
-//!    survivor patch via [`crate::merge::build_survivor_patch`].
-//! 3. Apply patches via [`crate::merge::apply_survivor_patch`].
-//! 4. Mark the losers with `deletedDate = now`. They **stay in the output
-//!    array** — this is what makes them visible in Bitwarden's **Trash**
-//!    folder after import so the user can audit every merge manually and
-//!    recover anything they disagree with. No item is ever removed.
+//! 1. **Strict login dedup** — group items by [`crate::key::dedup_key`];
+//!    skip items that fail [`crate::key::skip_from_dedup`]. For each
+//!    group of size > 1, pick a survivor (longer `passwordHistory` →
+//!    newer `revisionDate` → newer `creationDate`), compute the merged
+//!    survivor patch via [`crate::merge::build_survivor_patch`], apply
+//!    it, and mark the losers with `deletedDate = now`. Losers stay
+//!    in the output array so they surface in Bitwarden's **Trash**
+//!    folder after import — no item is ever removed.
+//! 2. **Empty-password login dedup** (opt-in) — same shape as Pass 1
+//!    but keyed by [`crate::key::empty_password_dedup_key`] over items
+//!    the strict pass skipped because their `login.password` was empty.
+//!    Refuses to group items whose only signal is the display name.
+//! 3. **Secure-note dedup** — group `type: 2` items by
+//!    [`crate::key::secure_note_key`] (name + org + canonicalized
+//!    body), collapse literal duplicates only.
+//! 4. **SSH-key dedup** — group `type: 5` items by
+//!    [`crate::key::ssh_key_key`] (full canonicalized key material +
+//!    org); any byte-level mismatch keeps items separate.
+//! 5. **Folder dedup** — collapse same-name folders in the top-level
+//!    `folders` array and remap every item's `folderId` to the
+//!    surviving folder. Runs in [`dedup_export`] before items are
+//!    handed to the four item-level passes above so divergent-folder
+//!    notes only fire for genuinely different folders.
 //!
 //! **Survivor selection** is deterministic: longer `passwordHistory` wins
 //! (captures more rotation history), then newer `revisionDate`, then newer
@@ -123,9 +138,15 @@ impl SignalKind {
 ///
 /// Field meanings:
 /// - `total`    — input item count
-/// - `skipped`  — items passed through without being grouped (non-logins,
-///                reprompt-gated, empty password, already tagged `[duplicate]`,
-///                already-deleted items in the input)
+/// - `skipped`  — items the **strict login pass** (Pass 1) declined to
+///                group: non-logins, reprompt-gated, empty password,
+///                already tagged `[duplicate]`, already-deleted items
+///                in the input. **Note**: when
+///                `collapse_empty_passwords` is set, some items
+///                counted here may still be grouped by the
+///                empty-password pass (Pass 2) — `skipped` is
+///                strict-pass-local, not "skipped by every pass".
+///                Audit JSON publishes this as `strict_pass_skipped`.
 /// - `groups`   — number of strict duplicate groups found
 /// - `trashed`  — number of items freshly moved to Trash by this run
 ///                (dedup losers — they stay in the output array with

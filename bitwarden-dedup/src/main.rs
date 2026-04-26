@@ -154,7 +154,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "ssh_key_groups": stats.ssh_key_groups,
         "totp_conflict_groups": stats.totp_conflict_groups,
         "folders_deduplicated": stats.folders_deduplicated,
-        "skipped_from_dedup": stats.skipped,
+        // Strict-pass-local skip count: items the strict login pass
+        // declined to group (non-logins, reprompt-gated, empty
+        // password, `[duplicate]`-tagged, or already trashed). When
+        // `collapse_empty_passwords` is set, some items in this
+        // bucket may still be grouped by Pass 2 — read alongside
+        // `empty_password_groups` / `empty_password_trashed` for the
+        // full picture.
+        "strict_pass_skipped": stats.skipped,
         "uris_merged_into_kept_total": stats.merged,
         "entries": stats.audit_entries,
     });
@@ -162,7 +169,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Input:         {}", input_path.display());
     println!(
-        "               {} items total, {} skipped from dedup",
+        "               {} items total, {} skipped by strict pass",
         stats.total, stats.skipped
     );
     println!("Groups:        {} total dedup groups", stats.groups);

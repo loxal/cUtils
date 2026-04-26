@@ -182,7 +182,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "ssh_key_groups": dedup.ssh_key_groups,
         "totp_conflict_groups": dedup.totp_conflict_groups,
         "folders_deduplicated": dedup.folders_deduplicated,
-        "skipped_from_dedup": dedup.skipped,
+        // Strict-pass-local skip count — see the same field in
+        // `bitwarden-dedup --help` for the empty-password-pass
+        // interaction.
+        "strict_pass_skipped": dedup.skipped,
         "uris_merged_into_kept_total": dedup.merged,
         "entries": dedup.audit_entries.clone(),
     });

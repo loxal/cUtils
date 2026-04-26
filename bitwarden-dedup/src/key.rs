@@ -208,11 +208,19 @@ pub fn empty_password_dedup_key(item: &Value) -> String {
     );
     let mut hosts: Vec<(HostKind, String)> = uri_host_set(item).into_iter().collect();
     hosts.sort();
+    // Length-prefixed pair encoding: `<len>:<kind>:<host_token>` per
+    // pair, separated by NUL. Opaque host tokens are arbitrary user
+    // strings, so a naive `join(",")` is delimiter-ambiguous — an
+    // opaque host whose text happens to contain `,Opaque:` or
+    // `,Dns:` collides with a two-host set under that scheme. The
+    // length prefix on the host token alone makes any embedded
+    // delimiter byte safe; sorted-pair order keeps the encoding
+    // canonical.
     let host_blob = hosts
         .iter()
-        .map(|(k, h)| format!("{k:?}:{h}"))
+        .map(|(k, h)| format!("{k:?}:{}:{h}", h.len()))
         .collect::<Vec<_>>()
-        .join(",");
+        .join("\x1f");
     let fido2 = fido2_signature(item);
     let org_id = item
         .get("organizationId")
@@ -1290,6 +1298,34 @@ mod tests {
         assert_ne!(empty_password_dedup_key(&b), empty_password_dedup_key(&c));
         // Default port is dropped by url::Url, so c and d collapse.
         assert_eq!(empty_password_dedup_key(&c), empty_password_dedup_key(&d));
+    }
+
+    #[test]
+    fn empty_pw_key_host_set_encoding_unambiguous() {
+        // Regression guard: opaque host tokens are arbitrary user
+        // strings. A naive `join(",")` over `format!("{kind:?}:{h}")`
+        // would let a single opaque host whose text happens to
+        // contain delimiter-shaped bytes collide with a two-host set.
+        // The length-prefixed encoding eliminates that ambiguity.
+        let two_opaque = with_uris(empty_pw_login("X", ""), &["a", "b"]);
+        let one_opaque_with_delim_in_value = with_uris(
+            empty_pw_login("X", ""),
+            &["a,Opaque:b"], // the literal collision shape from the reviewer
+        );
+        assert_ne!(
+            empty_password_dedup_key(&two_opaque),
+            empty_password_dedup_key(&one_opaque_with_delim_in_value),
+            "host-set encoding must be unambiguous across delimiter-shaped tokens"
+        );
+
+        // Also try the unit-separator delimiter variant.
+        let two_opaque_us = with_uris(empty_pw_login("X", ""), &["a", "b"]);
+        let one_opaque_us = with_uris(empty_pw_login("X", ""), &["a\x1fOpaque:1:b"]);
+        assert_ne!(
+            empty_password_dedup_key(&two_opaque_us),
+            empty_password_dedup_key(&one_opaque_us),
+            "embedded \\x1f in an opaque token must not collide with a two-host set"
+        );
     }
 
     #[test]
