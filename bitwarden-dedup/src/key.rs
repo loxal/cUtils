@@ -516,8 +516,12 @@ pub fn ssh_key_key(item: &Value) -> String {
 ///
 /// The same safety floor applies as for logins: trashed, reprompt-
 /// gated, and `[duplicate]`-tagged items pass through untouched.
-/// Items with no `card` block at all are refused — there is nothing
-/// stable to group on.
+/// Items whose `card` field is missing, `null`, or any non-object
+/// JSON value are refused — there is nothing stable to group on, and
+/// canonicalizing `null` would let every malformed `{"type":3,
+/// "card":null}` item with the same name collapse onto a single
+/// survivor (the REST decoder in `live_vault/cipher_codec.rs` can
+/// emit that shape on incomplete cipher payloads).
 pub fn is_dedupable_card(item: &Value) -> bool {
     if item.get("type").and_then(Value::as_u64) != Some(3) {
         return false;
@@ -531,7 +535,7 @@ pub fn is_dedupable_card(item: &Value) -> bool {
     if get_str(item, "name").contains("[duplicate]") {
         return false;
     }
-    item.get("card").is_some()
+    item.get("card").is_some_and(Value::is_object)
 }
 
 /// Grouping key for cards (`type: 3`).
@@ -546,6 +550,16 @@ pub fn is_dedupable_card(item: &Value) -> bool {
 ///   serialization). Any byte-level mismatch in any populated field
 ///   keeps items distinct — same conservative bias as
 ///   [`ssh_key_key`]: when in doubt, never merge.
+///
+/// **Cross-source caveat**: the canonical signature distinguishes
+/// `""`, `null`, and absent fields byte-exactly. The REST decoder
+/// (`live_vault/cipher_codec.rs`) emits every card subfield as
+/// either a string or `null`; `bw export --format json` may use a
+/// different representation for unset fields. If you mix items from
+/// the two paths in the same vault, otherwise-identical cards may
+/// fail to collapse. The bias is over-splitting (safe) rather than
+/// over-merging — run all items through one source path before
+/// dedup if you want maximum collapse.
 pub fn card_key(item: &Value) -> String {
     let name = normalize_name(get_str(item, "name"));
     let org = item
@@ -566,8 +580,10 @@ pub fn card_key(item: &Value) -> String {
 /// etc.). Any mismatch in any field keeps items distinct.
 ///
 /// Same safety floor as cards: trashed, reprompt-gated, and
-/// `[duplicate]`-tagged items pass through; items without an
-/// `identity` block are refused.
+/// `[duplicate]`-tagged items pass through; items whose `identity`
+/// field is missing, `null`, or any non-object JSON value are
+/// refused (canonicalizing `null` would let malformed records
+/// collapse on name+org alone).
 pub fn is_dedupable_identity(item: &Value) -> bool {
     if item.get("type").and_then(Value::as_u64) != Some(4) {
         return false;
@@ -581,7 +597,7 @@ pub fn is_dedupable_identity(item: &Value) -> bool {
     if get_str(item, "name").contains("[duplicate]") {
         return false;
     }
-    item.get("identity").is_some()
+    item.get("identity").is_some_and(Value::is_object)
 }
 
 /// Grouping key for identities (`type: 4`).
@@ -594,6 +610,12 @@ pub fn is_dedupable_identity(item: &Value) -> bool {
 ///   (firstName/lastName/address/email/phone/ssn/passportNumber/
 ///   licenseNumber/etc.) participates; any byte-level mismatch
 ///   keeps items distinct.
+///
+/// Cross-source caveat: same as [`card_key`] — the canonical
+/// signature distinguishes `""`, `null`, and absent fields, so
+/// items from `bw export` and the REST API path may not collapse
+/// against each other if the two emit different representations
+/// for unset subfields. Bias is over-splitting (safe).
 pub fn identity_key(item: &Value) -> String {
     let name = normalize_name(get_str(item, "name"));
     let org = item
@@ -1657,6 +1679,27 @@ mod tests {
     }
 
     #[test]
+    fn is_dedupable_card_rejects_null_or_non_object_block() {
+        // Regression guard: the REST decoder
+        // (live_vault/cipher_codec.rs) can emit `{"type": 3,
+        // "card": null}` for malformed/incomplete cipher payloads.
+        // Without an `is_object` check, multiple such items with
+        // the same name + org would canonicalize to `card=null` and
+        // collapse onto a single survivor. Refuse to consider them.
+        let null_block = json!({"type": 3, "name": "Visa", "card": null});
+        assert!(!is_dedupable_card(&null_block));
+
+        let array_block = json!({"type": 3, "name": "Visa", "card": []});
+        assert!(!is_dedupable_card(&array_block));
+
+        let string_block = json!({"type": 3, "name": "Visa", "card": "junk"});
+        assert!(!is_dedupable_card(&string_block));
+
+        let bool_block = json!({"type": 3, "name": "Visa", "card": false});
+        assert!(!is_dedupable_card(&bool_block));
+    }
+
+    #[test]
     fn card_key_distinct_from_other_type_keys() {
         // type=3 prefix must not collide with login / note / ssh-key namespaces.
         let card = card_item("X", "4111", "12", "2030", "123");
@@ -1731,6 +1774,21 @@ mod tests {
 
         let no_block = json!({"type": 4, "name": "x"});
         assert!(!is_dedupable_identity(&no_block));
+    }
+
+    #[test]
+    fn is_dedupable_identity_rejects_null_or_non_object_block() {
+        // Same regression guard as cards — `{"type":4,"identity":null}`
+        // would otherwise canonicalize to `identity=null` and let
+        // every malformed-identity item with a shared name collapse.
+        let null_block = json!({"type": 4, "name": "my", "identity": null});
+        assert!(!is_dedupable_identity(&null_block));
+
+        let array_block = json!({"type": 4, "name": "my", "identity": []});
+        assert!(!is_dedupable_identity(&array_block));
+
+        let number_block = json!({"type": 4, "name": "my", "identity": 42});
+        assert!(!is_dedupable_identity(&number_block));
     }
 
     #[test]

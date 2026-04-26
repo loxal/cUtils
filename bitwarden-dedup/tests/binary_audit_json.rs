@@ -42,14 +42,17 @@ fn cleanup(dir: &Path) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Two empty-password stubs that should collapse under
-/// `--collapse-empty-passwords`, plus one strict-pass duplicate pair
-/// (so the resulting audit JSON exercises both passes' counters).
+/// One duplicate of every dedupable type so the resulting audit
+/// JSON exercises every pass's counter in a single end-to-end run:
+/// strict-login pair, empty-password pair, card pair, identity
+/// pair. The empty-password pair only collapses when the binary is
+/// invoked with `--collapse-empty-passwords`; the others collapse
+/// by default.
 fn synthetic_export() -> Value {
     json!({
         "folders": [],
         "items": [
-            // strict-pass duplicate
+            // strict-pass login duplicate
             {
                 "id": "s1", "type": 1, "name": "Strict",
                 "revisionDate": "2026-01-01T00:00:00Z",
@@ -62,7 +65,7 @@ fn synthetic_export() -> Value {
                 "login": {"username": "u", "password": "p",
                     "uris": [{"uri": "https://strict.example.test/"}]}
             },
-            // empty-pw duplicate (host signal)
+            // empty-password login duplicate (host signal)
             {
                 "id": "e1", "type": 1, "name": "Acme",
                 "revisionDate": "2026-01-01T00:00:00Z",
@@ -74,6 +77,42 @@ fn synthetic_export() -> Value {
                 "revisionDate": "2026-01-02T00:00:00Z",
                 "login": {"username": "u@acme.example.test", "password": "",
                     "uris": [{"uri": "https://acme.example.test/"}]}
+            },
+            // card duplicate (synthetic — never a real PAN)
+            {
+                "id": "c1", "type": 3, "name": "TestCard",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "card": {
+                    "cardholderName": "Test User", "brand": "Visa",
+                    "number": "0000000000000000", "expMonth": "12",
+                    "expYear": "2099", "code": "000"
+                }
+            },
+            {
+                "id": "c2", "type": 3, "name": "TestCard",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "card": {
+                    "cardholderName": "Test User", "brand": "Visa",
+                    "number": "0000000000000000", "expMonth": "12",
+                    "expYear": "2099", "code": "000"
+                }
+            },
+            // identity duplicate
+            {
+                "id": "i1", "type": 4, "name": "TestIdentity",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "identity": {
+                    "firstName": "Test", "lastName": "User",
+                    "email": "user@example.test"
+                }
+            },
+            {
+                "id": "i2", "type": 4, "name": "TestIdentity",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "identity": {
+                    "firstName": "Test", "lastName": "User",
+                    "email": "user@example.test"
+                }
             },
         ]
     })
@@ -159,15 +198,20 @@ fn bitwarden_dedup_audit_json_has_all_documented_fields() {
         );
     }
 
-    // Counts match expectations: 1 strict-pass group + 1 empty-pw
-    // group + 0 secure-note + 0 ssh-key. duplicate_groups is the sum.
+    // Counts match expectations: 1 strict-pass + 1 empty-pw + 1 card
+    // + 1 identity = 4 groups; secure-note and ssh-key groups stay 0
+    // (no fixture items of those types). duplicate_groups is the sum.
     assert_eq!(audit_doc["strict_login_groups"], 1);
     assert_eq!(audit_doc["empty_password_groups"], 1);
     assert_eq!(audit_doc["secure_note_groups"], 0);
     assert_eq!(audit_doc["ssh_key_groups"], 0);
-    assert_eq!(audit_doc["duplicate_groups"], 2);
+    assert_eq!(audit_doc["card_groups"], 1);
+    assert_eq!(audit_doc["identity_groups"], 1);
+    assert_eq!(audit_doc["duplicate_groups"], 4);
     assert_eq!(audit_doc["collapse_empty_passwords"], true);
     assert_eq!(audit_doc["empty_password_trashed"], 1);
+    // Each duplicate pair contributes one trashed loser → 4 total.
+    assert_eq!(audit_doc["trashed_count"], 4);
 
     // Back-compat aliases hold the same values as their new keys.
     assert_eq!(audit_doc["skipped_from_dedup"], audit_doc["strict_pass_skipped"]);
@@ -192,6 +236,26 @@ fn bitwarden_dedup_audit_json_has_all_documented_fields() {
         ["fido2", "host", "username_only"].contains(&signal),
         "unexpected signal_kind {signal:?}"
     );
+
+    // Card and identity audit entries — labeled with the right
+    // item_kind so downstream tooling can grep them. Confirms the
+    // card/identity passes actually fired through the binary, not
+    // just that the audit-doc keys exist.
+    let card_entries: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e["item_kind"] == "card")
+        .collect();
+    assert_eq!(card_entries.len(), 1, "expected one trashed card from the fixture");
+    assert_eq!(card_entries[0]["removed_id"], "c1");
+    assert_eq!(card_entries[0]["kept_id"], "c2");
+
+    let identity_entries: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e["item_kind"] == "identity")
+        .collect();
+    assert_eq!(identity_entries.len(), 1);
+    assert_eq!(identity_entries[0]["removed_id"], "i1");
+    assert_eq!(identity_entries[0]["kept_id"], "i2");
 
     cleanup(&dir);
 }
@@ -228,9 +292,15 @@ fn bitwarden_dedup_audit_json_off_by_default_omits_empty_pw_collapse() {
     assert_eq!(audit_doc["collapse_empty_passwords"], false);
     assert_eq!(audit_doc["empty_password_groups"], 0);
     assert_eq!(audit_doc["empty_password_trashed"], 0);
-    // The two empty-pw stubs stay as living items (strict pass
-    // skipped them; no second pass ran).
-    assert_eq!(audit_doc["living_item_count"], 3);
+    // Card and identity passes still run by default (no opt-in flag),
+    // so they collapse their fixtures regardless. The empty-pw pair
+    // stays as 2 living items because the flag is off.
+    assert_eq!(audit_doc["card_groups"], 1);
+    assert_eq!(audit_doc["identity_groups"], 1);
+    // Living item arithmetic with this fixture (8 input items):
+    //   strict-login: 2 → 1, empty-pw: 2 → 2, card: 2 → 1, identity: 2 → 1.
+    // Total living = 1 + 2 + 1 + 1 = 5.
+    assert_eq!(audit_doc["living_item_count"], 5);
 
     cleanup(&dir);
 }

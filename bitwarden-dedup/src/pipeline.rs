@@ -3,8 +3,9 @@
 //! **"Which item survives, and what's the audit trail?"** — pipeline
 //! orchestration.
 //!
-//! The dedup pipeline runs in five passes (the empty-password login
-//! pass is opt-in via [`DedupConfig::collapse_empty_passwords`]):
+//! The dedup pipeline runs in seven passes (the empty-password login
+//! pass is opt-in via [`DedupConfig::collapse_empty_passwords`]; the
+//! other six run by default):
 //!
 //! 1. **Strict login dedup** — group items by [`crate::key::dedup_key`];
 //!    skip items that fail [`crate::key::skip_from_dedup`]. For each
@@ -145,13 +146,13 @@ impl SignalKind {
 ///
 /// Field meanings:
 /// - `total`    — input item count
-/// - `skipped`  — items the **strict login pass** (Pass 1) declined to
-///                group: non-logins, reprompt-gated, empty password,
-///                already tagged `[duplicate]`, already-deleted items
-///                in the input. **Note**: when
+/// - `skipped`  — items the **strict login pass** declined to group:
+///                non-logins, reprompt-gated, empty password,
+///                already tagged `[duplicate]`, already-deleted
+///                items in the input. **Note**: when
 ///                `collapse_empty_passwords` is set, some items
 ///                counted here may still be grouped by the
-///                empty-password pass (Pass 2) — `skipped` is
+///                empty-password pass — `skipped` is
 ///                strict-pass-local, not "skipped by every pass".
 ///                Audit JSON publishes this as `strict_pass_skipped`.
 /// - `groups`   — total dedup groups across **all** passes (sum of
@@ -417,9 +418,17 @@ pub(crate) fn dedup_items_with_folders(
 ) -> DedupStats {
     let total = items.len();
 
-    // Pass 1: group by dedup key. When `split_divergent_totps` is set,
-    // append the item's TOTP to the group key so items with different
-    // TOTPs never share a group — they stay as separate living items.
+    // ============================================================
+    // Pass 1: strict login dedup. Implemented as four internal
+    // steps; the per-pass numbering for the wider pipeline resumes
+    // at "Pass 2" below (empty-password). See the module docstring
+    // for the high-level pass list.
+    // ============================================================
+    //
+    // Step 1.a: group by dedup key. When `split_divergent_totps` is
+    // set, append the item's TOTP to the group key so items with
+    // different TOTPs never share a group — they stay as separate
+    // living items.
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     let mut skipped = 0usize;
     for (idx, item) in items.iter().enumerate() {
@@ -444,7 +453,7 @@ pub(crate) fn dedup_items_with_folders(
     let mut dupe_groups: Vec<Vec<usize>> = groups.into_values().filter(|v| v.len() > 1).collect();
     dupe_groups.sort_by_key(|g| *g.first().unwrap_or(&0));
 
-    // Pass 2: plan removals and build the merged-survivor value for each group.
+    // Step 1.b: plan removals and build the merged-survivor value for each group.
     let mut to_drop: HashSet<usize> = HashSet::new();
     let mut audit_entries: Vec<Value> = Vec::new();
     let mut survivor_patches: Vec<(usize, SurvivorPatch)> = Vec::new();
@@ -528,15 +537,15 @@ pub(crate) fn dedup_items_with_folders(
         survivor_patches.push((keep_idx, patch));
     }
 
-    // Pass 3: apply merged fields to the surviving items.
+    // Step 1.c: apply merged fields to the surviving items.
     for (keep_idx, patch) in survivor_patches {
         apply_survivor_patch(&mut items[keep_idx], patch);
     }
 
-    // Pass 4: mark login dedup losers with `deletedDate = now`. They stay
-    // in the array so Bitwarden surfaces them in the Trash folder after
-    // import. Nothing is ever removed — the user can manually recover
-    // any false positive.
+    // Step 1.d: mark login dedup losers with `deletedDate = now`.
+    // They stay in the array so Bitwarden surfaces them in the
+    // Trash folder after import. Nothing is ever removed — the user
+    // can manually recover any false positive.
     let now = iso8601_now();
     for (i, item) in items.iter_mut().enumerate() {
         if to_drop.contains(&i)
@@ -546,7 +555,7 @@ pub(crate) fn dedup_items_with_folders(
         }
     }
 
-    // Pass 4.5: empty-password login dedup (opt-in). Runs AFTER the
+    // Pass 2: empty-password login dedup (opt-in). Runs AFTER the
     // strict pass has already marked its losers with `deletedDate`,
     // and `is_dedupable_empty_password_login` filters those out — so
     // a strict-pass loser is never re-considered, and this pass only
@@ -558,18 +567,22 @@ pub(crate) fn dedup_items_with_folders(
         EmptyPasswordOutcome::default()
     };
 
-    // Pass 5: secure-note dedup.
+    // Pass 3: secure-note dedup.
     let (note_groups, note_trashed, note_audit_entries) = dedup_secure_notes(items, folders, &now);
 
-    // Pass 6: SSH key dedup.
+    // Pass 4: SSH key dedup.
     let (ssh_groups, ssh_trashed, ssh_audit_entries) = dedup_ssh_keys(items, folders, &now);
 
-    // Pass 7: Card dedup (strict equality on every populated card field).
+    // Pass 5: Card dedup (strict equality on every populated card field).
     let (card_groups, card_trashed, card_audit_entries) = dedup_cards(items, folders, &now);
 
-    // Pass 8: Identity dedup (strict equality on every populated identity field).
+    // Pass 6: Identity dedup (strict equality on every populated identity field).
     let (identity_groups, identity_trashed, identity_audit_entries) =
         dedup_identities(items, folders, &now);
+
+    // (Pass 7, folder dedup, runs in `dedup_export_with_config`
+    // before items are handed to this function — see the module
+    // docstring.)
 
     // Combined counts cover every pass.
     let strict_login_groups = dupe_groups.len();
@@ -637,7 +650,7 @@ struct EmptyPasswordOutcome {
     groups_by_signal: BTreeMap<SignalKind, usize>,
 }
 
-/// Pass 4.5 — group credential-less stubs (empty `login.password`)
+/// Pass 2 — group credential-less stubs (empty `login.password`)
 /// that the strict pass deliberately skipped. Same merge semantics as
 /// the strict pass: longer `passwordHistory` → newer `revisionDate` →
 /// newer `creationDate` survivor selection, full URI/notes/fields
@@ -1769,6 +1782,56 @@ mod tests {
             .expect("an identity audit entry must exist");
         assert_eq!(identity_entry["removed_id"], "i1");
         assert_eq!(identity_entry["kept_id"], "i2");
+    }
+
+    #[test]
+    fn null_card_blocks_do_not_collapse_through_pipeline() {
+        // End-to-end regression: three items with `card: null`,
+        // identical names, same org. Without the is_object() filter
+        // they would collapse on `name+org+null`. Pipeline must
+        // leave all three living.
+        let mut items = vec![
+            json!({
+                "id": "a", "type": 3, "name": "Bad",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "card": null
+            }),
+            json!({
+                "id": "b", "type": 3, "name": "Bad",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "card": null
+            }),
+            json!({
+                "id": "c", "type": 3, "name": "Bad",
+                "revisionDate": "2026-01-03T00:00:00Z",
+                "card": null
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(
+            stats.card_groups, 0,
+            "items with card:null must NOT collapse"
+        );
+        assert_eq!(stats.living, 3);
+    }
+
+    #[test]
+    fn null_identity_blocks_do_not_collapse_through_pipeline() {
+        let mut items = vec![
+            json!({
+                "id": "a", "type": 4, "name": "BadIdentity",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "identity": null
+            }),
+            json!({
+                "id": "b", "type": 4, "name": "BadIdentity",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "identity": null
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.identity_groups, 0);
+        assert_eq!(stats.living, 2);
     }
 
     #[test]
