@@ -28,9 +28,43 @@
 //! This is the only field where dedup can displace user-entered data —
 //! everything else is either in the key (distinct-preserving) or union-merged.
 
+use std::collections::HashSet;
+
 use serde_json::Value;
 
 use crate::json_util::get_str;
+
+/// Schemes whose host component we trust as a real DNS or IP authority.
+/// All other schemes (custom schemes, mailto:, opaque identifiers) fall
+/// through to [`HostKind::Opaque`] in [`host_of`] so we never case-fold
+/// what may be a case-sensitive identifier (`myapp://Login` and
+/// `myapp://login` stay distinct).
+const DNS_ALLOWLIST_SCHEMES: &[&str] = &["http", "https", "ws", "wss"];
+
+/// Classification of how a hostname-set entry was derived. Drives both
+/// the per-key-token prefix in [`empty_password_dedup_key`] and the
+/// audit `signal_kind` field on dedup losers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HostKind {
+    /// Confirmed DNS host parsed from an allowlisted authority-style
+    /// URL. Lowercased — DNS is case-insensitive per RFC 1035 §2.3.3.
+    Dns,
+    /// IPv4 / IPv6 host literal from an allowlisted authority-style
+    /// URL. Preserved exactly as parsed (`url::Url` already
+    /// canonicalizes IPv6).
+    Ip,
+    /// `androidapp://com.example.app` — package name. **Case is
+    /// preserved verbatim** per Android spec; same rule as
+    /// [`crate::uris`].
+    AndroidApp,
+    /// Any other identifier we did not parse as a confirmed
+    /// authority-style URL: bare reverse-DNS App IDs
+    /// (`com.example.iosapp`), custom-scheme URIs (`myapp://login`),
+    /// opaque strings. **Case is preserved verbatim** — these may be
+    /// used by case-sensitive matchers downstream and we refuse to
+    /// fold them.
+    Opaque,
+}
 
 /// Duplicate-equality key for a Bitwarden login item.
 ///
@@ -88,6 +122,197 @@ pub fn normalize_name(s: &str) -> String {
         }
     }
     trimmed.to_lowercase()
+}
+
+/// Return `true` when an empty-password login item carries at least
+/// one identifying signal beyond its name (non-empty username,
+/// non-empty URI host set, or a fido2 credential set). Items that
+/// fail this check have nothing stable to group on and are left as
+/// distinct living entries.
+fn empty_password_signal_ok(item: &Value) -> bool {
+    let login = item.get("login");
+    let user_ok = login
+        .and_then(|l| l.get("username"))
+        .and_then(Value::as_str)
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let uri_ok = !uri_host_set(item).is_empty();
+    let fido_ok = login
+        .and_then(|l| l.get("fido2Credentials"))
+        .and_then(Value::as_array)
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    user_ok || uri_ok || fido_ok
+}
+
+/// Return `true` for login (`type: 1`) items that the empty-password
+/// dedup pass should consider for grouping.
+///
+/// The decision: collapse all three signal kinds (username, host,
+/// fido2) when otherwise identical. The validation file (8519-item
+/// vault) showed zero false-positive groups under this rule — every
+/// observed cluster (the `oura` username-only group, the `heatledger`
+/// host-only group, etc.) is genuinely the same account. Losers are
+/// preserved in the trash sidecar so any future false positive on a
+/// different vault is recoverable. Audit entries carry a
+/// `signal_kind` field so reviewers can grep the riskier
+/// (`username_only`) class.
+///
+/// Identical filters to [`skip_from_dedup`] EXCEPT the empty-password
+/// rule is inverted (empty is required, not rejected), and the item
+/// must carry at least one identifying signal beyond its name (see
+/// [`empty_password_signal_ok`]).
+pub fn is_dedupable_empty_password_login(item: &Value) -> bool {
+    if item.get("type").and_then(Value::as_u64) != Some(1) {
+        return false;
+    }
+    if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    if item.get("reprompt").and_then(Value::as_u64) == Some(1) {
+        return false;
+    }
+    if get_str(item, "name").contains("[duplicate]") {
+        return false;
+    }
+    let pw = item
+        .get("login")
+        .and_then(|l| l.get("password"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !pw.trim().is_empty() {
+        return false; // strict pass already handled this
+    }
+    empty_password_signal_ok(item)
+}
+
+/// Dedup key for the empty-password pass.
+///
+/// Differs from [`dedup_key`] in two ways:
+/// 1. Replaces the `password` slot with a constant `empty-pw` literal
+///    so empty-password items never collide with non-empty-password
+///    items even if the upstream caller forgets to filter.
+/// 2. Adds a sorted hostname set extracted from `login.uris`. Each
+///    entry is tagged with its [`HostKind`] in the key token so a DNS
+///    `example.com` and an opaque `example.com` (e.g. as a bare App ID
+///    string) never collide. URI host is part of the *grouping key*
+///    but the full URI list is still union-merged onto the survivor.
+pub fn empty_password_dedup_key(item: &Value) -> String {
+    let name = normalize_name(get_str(item, "name"));
+    let login = item.get("login");
+    let user = norm_user(
+        login
+            .and_then(|l| l.get("username"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    let mut hosts: Vec<(HostKind, String)> = uri_host_set(item).into_iter().collect();
+    hosts.sort();
+    let host_blob = hosts
+        .iter()
+        .map(|(k, h)| format!("{k:?}:{h}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let fido2 = fido2_signature(item);
+    let org_id = item
+        .get("organizationId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    format!("type=1\0empty-pw\0{name}\0{user}\0hosts={host_blob}\0{fido2}\0{org_id}")
+}
+
+/// Collect the set of `(HostKind, host_token)` pairs from an item's
+/// `login.uris`. Used both by [`empty_password_dedup_key`] (in the
+/// grouping key) and [`empty_password_signal_ok`] (to decide whether
+/// the item has any URI-based identity).
+pub(crate) fn uri_host_set(item: &Value) -> HashSet<(HostKind, String)> {
+    let mut out = HashSet::new();
+    let Some(arr) = item
+        .get("login")
+        .and_then(|l| l.get("uris"))
+        .and_then(Value::as_array)
+    else {
+        return out;
+    };
+    for u in arr {
+        let Some(uri) = u.get("uri").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(pair) = host_of(uri) {
+            out.insert(pair);
+        }
+    }
+    out
+}
+
+/// Classify and extract the host portion of a URI.
+///
+/// Returns `None` for empty / whitespace-only input. Otherwise returns
+/// `(kind, host_token)` where `host_token` already includes any
+/// explicit non-default port (e.g. `example.com:8443`) so a reviewer
+/// scanning the dedup key can read it back as a single string.
+///
+/// - [`HostKind::AndroidApp`] for `androidapp://…` — package name
+///   preserved verbatim (case-sensitive). Path / query / fragment
+///   suffixes are stripped: `androidapp://com.example.app/login?x=1#y`
+///   → `com.example.app`.
+/// - [`HostKind::Dns`] for an allowlisted-scheme URL (`http(s)`,
+///   `ws(s)`) whose host is a domain — host lowercased (DNS is
+///   case-insensitive), non-default port preserved.
+/// - [`HostKind::Ip`] for an allowlisted-scheme URL whose host is an
+///   IPv4 or IPv6 literal — used as-is (`url::Url` canonicalizes
+///   IPv6), non-default port preserved.
+/// - [`HostKind::Opaque`] for everything else: schemes outside the
+///   allowlist (`myapp://`, `mailto:`, custom URIs), bare reverse-DNS
+///   App IDs, or unparseable strings. **Case preserved verbatim**.
+///   Mirrors the [`crate::uris`] rule: do not case-fold identifiers we
+///   do not recognize as DNS hosts.
+pub fn host_of(uri: &str) -> Option<(HostKind, String)> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("androidapp://") {
+        let pkg_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let pkg = &rest[..pkg_end];
+        if pkg.is_empty() {
+            return None;
+        }
+        return Some((HostKind::AndroidApp, pkg.to_string()));
+    }
+    if let Ok(parsed) = url::Url::parse(trimmed) {
+        let scheme = parsed.scheme();
+        if DNS_ALLOWLIST_SCHEMES.contains(&scheme) {
+            match parsed.host() {
+                Some(url::Host::Domain(d)) if !d.is_empty() => {
+                    return Some((HostKind::Dns, with_port(d.to_lowercase(), &parsed)));
+                }
+                Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => {
+                    if let Some(h) = parsed.host_str() {
+                        return Some((HostKind::Ip, with_port(h.to_string(), &parsed)));
+                    }
+                }
+                _ => { /* fall through to Opaque */ }
+            }
+        }
+        // Schemes outside the allowlist — even when url::Url extracted
+        // a plausible-looking host, the identifier semantics are
+        // unknown and may be case-sensitive. Treat as opaque.
+    }
+    Some((HostKind::Opaque, trimmed.to_string()))
+}
+
+/// Append the URL's explicit non-default port to `host` when present.
+/// `url::Url::port()` returns `None` for the scheme's default port
+/// (e.g. 443 for https), so this is a no-op for default-port URLs and
+/// a `host:port` join for non-default ones. Non-default ports are
+/// part of identity: `internal-svc:8080` and `internal-svc:9090` are
+/// different services.
+fn with_port(host: String, url: &url::Url) -> String {
+    match url.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    }
 }
 
 /// Return `true` for login (`type: 1`) items that must never be grouped
@@ -562,7 +787,11 @@ mod tests {
 
     #[test]
     fn skip_already_marked_duplicate() {
-        assert!(skip_from_dedup(&login("GitHub [duplicate]", "a@b.com", "pw")));
+        assert!(skip_from_dedup(&login(
+            "GitHub [duplicate]",
+            "a@b.com",
+            "pw"
+        )));
     }
 
     #[test]
@@ -778,6 +1007,380 @@ mod tests {
         assert!(is_dedupable_secure_note(&json!({"type": 2, "name": "n"})));
         assert!(!is_dedupable_secure_note(&json!({"type": 1, "name": "n"})));
         assert!(!is_dedupable_secure_note(&json!({"type": 3, "name": "n"})));
+    }
+
+    // ---------- empty-password dedup pass: host_of ----------
+
+    #[test]
+    fn host_of_androidapp_strips_path_query_fragment() {
+        assert_eq!(
+            host_of("androidapp://com.Example.App/path"),
+            Some((HostKind::AndroidApp, "com.Example.App".to_string())),
+            "case must be preserved; path stripped"
+        );
+        assert_eq!(
+            host_of("androidapp://com.example.app?x=1"),
+            Some((HostKind::AndroidApp, "com.example.app".to_string())),
+            "query string must not appear in the package token"
+        );
+        assert_eq!(
+            host_of("androidapp://com.example.app#frag"),
+            Some((HostKind::AndroidApp, "com.example.app".to_string())),
+            "fragment must not appear in the package token"
+        );
+        assert_eq!(
+            host_of("androidapp://com.Example.App/path?x=1#y"),
+            Some((HostKind::AndroidApp, "com.Example.App".to_string())),
+            "all three suffixes stripped at once"
+        );
+    }
+
+    #[test]
+    fn host_of_dns_lowercased_default_port_dropped() {
+        assert_eq!(
+            host_of("https://EXAMPLE.com/path?q=1"),
+            Some((HostKind::Dns, "example.com".to_string())),
+            "DNS lowercased per RFC 1035; default port absent because not explicit"
+        );
+        assert_eq!(
+            host_of("https://example.com:443/"),
+            Some((HostKind::Dns, "example.com".to_string())),
+            "url::Url drops default port from port() for known schemes"
+        );
+    }
+
+    #[test]
+    fn host_of_preserves_non_default_port() {
+        assert_eq!(
+            host_of("https://example.com:8443/"),
+            Some((HostKind::Dns, "example.com:8443".to_string())),
+            "non-default port stays in the host token — port can be identity"
+        );
+        assert_eq!(
+            host_of("http://example.com:8080/"),
+            Some((HostKind::Dns, "example.com:8080".to_string()))
+        );
+    }
+
+    #[test]
+    fn host_of_ipv6_with_non_default_port() {
+        assert_eq!(
+            host_of("https://[2001:db8::1]:8443/"),
+            Some((HostKind::Ip, "[2001:db8::1]:8443".to_string())),
+            "IPv6 canonical form from url::Url, port preserved"
+        );
+    }
+
+    #[test]
+    fn host_of_ipv4_with_non_default_port() {
+        assert_eq!(
+            host_of("http://192.0.2.10:8080/"),
+            Some((HostKind::Ip, "192.0.2.10:8080".to_string())),
+        );
+    }
+
+    #[test]
+    fn host_of_websocket_schemes_in_allowlist() {
+        assert_eq!(
+            host_of("ws://example.com/socket"),
+            Some((HostKind::Dns, "example.com".to_string())),
+            "ws is in the DNS allowlist"
+        );
+        assert_eq!(
+            host_of("wss://example.com/socket"),
+            Some((HostKind::Dns, "example.com".to_string())),
+            "wss is in the DNS allowlist"
+        );
+    }
+
+    #[test]
+    fn host_of_bare_reverse_dns_app_id() {
+        assert_eq!(
+            host_of("com.example.iosapp"),
+            Some((HostKind::Opaque, "com.example.iosapp".to_string())),
+            "no scheme → opaque, case preserved"
+        );
+        assert_eq!(
+            host_of("com.Example.iOSApp"),
+            Some((HostKind::Opaque, "com.Example.iOSApp".to_string())),
+            "case preserved verbatim — App IDs may be case-sensitive"
+        );
+    }
+
+    #[test]
+    fn host_of_custom_scheme_is_opaque_case_preserved() {
+        // The regression test: url::Url WILL parse `myapp://Login?token=abc`
+        // and extract `Login` as a host. The DNS allowlist must reject the
+        // unknown scheme so we do NOT case-fold an identifier with unknown
+        // semantics.
+        assert_eq!(
+            host_of("myapp://Login?token=abc"),
+            Some((HostKind::Opaque, "myapp://Login?token=abc".to_string())),
+            "custom scheme outside allowlist must stay opaque, case-exact"
+        );
+        assert_eq!(
+            host_of("MYAPP://login"),
+            Some((HostKind::Opaque, "MYAPP://login".to_string())),
+            "scheme case preserved verbatim"
+        );
+        assert_eq!(
+            host_of("mailto:user@example.com"),
+            Some((HostKind::Opaque, "mailto:user@example.com".to_string())),
+            "mailto: not in the allowlist"
+        );
+    }
+
+    #[test]
+    fn host_of_empty_or_whitespace_returns_none() {
+        assert!(host_of("").is_none());
+        assert!(host_of("   ").is_none());
+        assert!(host_of("\t\n").is_none());
+    }
+
+    // ---------- empty-password dedup pass: key construction ----------
+
+    fn empty_pw_login(name: &str, user: &str) -> Value {
+        json!({
+            "type": 1,
+            "name": name,
+            "login": { "username": user, "password": "" },
+        })
+    }
+
+    fn with_uris(mut item: Value, uris: &[&str]) -> Value {
+        let arr: Vec<Value> = uris
+            .iter()
+            .map(|u| json!({"uri": u, "match": null}))
+            .collect();
+        item["login"]["uris"] = Value::Array(arr);
+        item
+    }
+
+    #[test]
+    fn empty_pw_key_matches_when_only_uri_trailing_slash_differs() {
+        let a = with_uris(
+            empty_pw_login("Tribit", "alex@example.test"),
+            &["https://www.tribit.com"],
+        );
+        let b = with_uris(
+            empty_pw_login("Tribit", "alex@example.test"),
+            &["https://www.tribit.com/"],
+        );
+        assert_eq!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+    }
+
+    #[test]
+    fn empty_pw_key_matches_when_http_vs_https_for_same_host() {
+        let a = with_uris(
+            empty_pw_login("Trade Republic", "u"),
+            &["http://traderepublic.com"],
+        );
+        let b = with_uris(
+            empty_pw_login("Trade Republic", "u"),
+            &["https://traderepublic.com/"],
+        );
+        assert_eq!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+    }
+
+    #[test]
+    fn empty_pw_key_differs_on_different_hostnames() {
+        let a = with_uris(empty_pw_login("Acme", "u"), &["https://example.com/"]);
+        let b = with_uris(empty_pw_login("Acme", "u"), &["https://example.org/"]);
+        assert_ne!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+    }
+
+    #[test]
+    fn empty_pw_key_differs_on_different_usernames() {
+        let a = empty_pw_login("Acme", "alex@loxal.net");
+        let b = empty_pw_login("Acme", "alexander.orlov@loxal.net");
+        assert_ne!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+    }
+
+    #[test]
+    fn empty_pw_key_differs_on_org_id() {
+        let mut a = empty_pw_login("Acme", "u");
+        let mut b = empty_pw_login("Acme", "u");
+        a["organizationId"] = Value::Null;
+        b["organizationId"] = json!("11111111-1111-1111-1111-111111111111");
+        assert_ne!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+    }
+
+    #[test]
+    fn empty_pw_key_differs_on_fido2_set() {
+        let mut a = empty_pw_login("Acme", "u");
+        let mut b = empty_pw_login("Acme", "u");
+        a["login"]["fido2Credentials"] = json!([{"credentialId": "pk-alice"}]);
+        b["login"]["fido2Credentials"] = json!([{"credentialId": "pk-bob"}]);
+        assert_ne!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+    }
+
+    #[test]
+    fn empty_pw_key_strips_email_suffix_from_name() {
+        let a = empty_pw_login("fastly-eng.okta.com", "a@fastly.com");
+        let b = empty_pw_login("fastly-eng.okta.com (a@fastly.com)", "a@fastly.com");
+        assert_eq!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+    }
+
+    #[test]
+    fn empty_pw_key_distinct_from_strict_key_for_same_item() {
+        // `dedup_key` would key on password=""; the empty-pw key uses the
+        // sentinel "empty-pw" string and adds host data. Same item must
+        // produce different strings so the two passes never cross-merge.
+        let item = empty_pw_login("Acme", "u");
+        assert_ne!(dedup_key(&item), empty_password_dedup_key(&item));
+    }
+
+    #[test]
+    fn empty_pw_key_dns_and_opaque_do_not_collide() {
+        // An item carrying only a DNS URL `https://example.com/` and one
+        // carrying only the bare opaque string `example.com` must produce
+        // different keys — Dns:example.com vs Opaque:example.com.
+        let a = with_uris(empty_pw_login("X", ""), &["https://example.com/"]);
+        let b = with_uris(empty_pw_login("X", ""), &["example.com"]);
+        assert_ne!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+    }
+
+    #[test]
+    fn empty_pw_key_dns_case_folded_androidapp_case_preserved() {
+        // Three web URLs differing only in case → group together.
+        let a = with_uris(empty_pw_login("Acme", "u"), &["https://Example.com"]);
+        let b = with_uris(empty_pw_login("Acme", "u"), &["https://example.com"]);
+        let c = with_uris(empty_pw_login("Acme", "u"), &["https://EXAMPLE.com"]);
+        assert_eq!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+        assert_eq!(empty_password_dedup_key(&b), empty_password_dedup_key(&c));
+
+        // Three Android packages differing only in case → all distinct.
+        let p = with_uris(
+            empty_pw_login("Acme", "u"),
+            &["androidapp://com.Example.App"],
+        );
+        let q = with_uris(
+            empty_pw_login("Acme", "u"),
+            &["androidapp://com.example.app"],
+        );
+        let r = with_uris(
+            empty_pw_login("Acme", "u"),
+            &["androidapp://com.EXAMPLE.app"],
+        );
+        assert_ne!(empty_password_dedup_key(&p), empty_password_dedup_key(&q));
+        assert_ne!(empty_password_dedup_key(&q), empty_password_dedup_key(&r));
+        assert_ne!(empty_password_dedup_key(&p), empty_password_dedup_key(&r));
+    }
+
+    #[test]
+    fn empty_pw_key_port_bearing_separation() {
+        let a = with_uris(
+            empty_pw_login("Internal", ""),
+            &["https://internal.example.com:8443/"],
+        );
+        let b = with_uris(
+            empty_pw_login("Internal", ""),
+            &["https://internal.example.com:9090/"],
+        );
+        let c = with_uris(
+            empty_pw_login("Internal", ""),
+            &["https://internal.example.com/"],
+        );
+        let d = with_uris(
+            empty_pw_login("Internal", ""),
+            &["https://internal.example.com:443/"],
+        ); // default port
+        assert_ne!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+        assert_ne!(empty_password_dedup_key(&a), empty_password_dedup_key(&c));
+        assert_ne!(empty_password_dedup_key(&b), empty_password_dedup_key(&c));
+        // Default port is dropped by url::Url, so c and d collapse.
+        assert_eq!(empty_password_dedup_key(&c), empty_password_dedup_key(&d));
+    }
+
+    #[test]
+    fn empty_pw_key_custom_scheme_byte_exact() {
+        // Two custom-scheme URLs differing only in case stay split — the
+        // scheme is not in the DNS allowlist, so the entire URI is the
+        // opaque token.
+        let a = with_uris(empty_pw_login("MyApp", "u"), &["myapp://Login?token=abc"]);
+        let b = with_uris(empty_pw_login("MyApp", "u"), &["myapp://login?token=def"]);
+        assert_ne!(empty_password_dedup_key(&a), empty_password_dedup_key(&b));
+    }
+
+    // ---------- empty-password dedup pass: filtering ----------
+
+    #[test]
+    fn empty_pw_filter_skips_non_login_types() {
+        assert!(!is_dedupable_empty_password_login(
+            &json!({"type": 2, "name": "n"})
+        ));
+        assert!(!is_dedupable_empty_password_login(
+            &json!({"type": 5, "name": "n"})
+        ));
+    }
+
+    #[test]
+    fn empty_pw_filter_skips_trashed_reprompt_duplicate_tagged() {
+        let mut item = with_uris(empty_pw_login("Acme", "u"), &["https://acme.com/"]);
+        assert!(is_dedupable_empty_password_login(&item));
+
+        item["deletedDate"] = json!("2026-01-01T00:00:00Z");
+        assert!(!is_dedupable_empty_password_login(&item));
+
+        let mut item = with_uris(empty_pw_login("Acme", "u"), &["https://acme.com/"]);
+        item["reprompt"] = json!(1);
+        assert!(!is_dedupable_empty_password_login(&item));
+
+        let item = with_uris(
+            empty_pw_login("Acme [duplicate]", "u"),
+            &["https://acme.com/"],
+        );
+        assert!(!is_dedupable_empty_password_login(&item));
+    }
+
+    #[test]
+    fn empty_pw_filter_skips_non_empty_password() {
+        // Strict pass already handles items with passwords. The
+        // empty-password pass must defer to it — never run on an item
+        // the strict pass already grouped.
+        let item = json!({
+            "type": 1, "name": "Acme",
+            "login": {"username": "u", "password": "actual-pw"}
+        });
+        assert!(!is_dedupable_empty_password_login(&item));
+    }
+
+    #[test]
+    fn empty_pw_filter_skips_no_signal_items() {
+        // No username, no URIs, no fido2 → name is the only signal.
+        // Refuse to group: validation file showed 30 such items must
+        // survive untouched.
+        let item = empty_pw_login("Acme", "");
+        assert!(!is_dedupable_empty_password_login(&item));
+
+        // Empty username + empty URI list (key present but no entries).
+        let item = with_uris(empty_pw_login("Acme", ""), &[]);
+        assert!(!is_dedupable_empty_password_login(&item));
+    }
+
+    #[test]
+    fn empty_pw_filter_accepts_username_only_signal() {
+        // The `oura` group from the validation file: same name, same
+        // username, no URIs, no fido. Username alone is the riskiest
+        // signal class but per design we still collapse — losers are
+        // recoverable from the trash sidecar.
+        let item = empty_pw_login("oura", "alex@example.test");
+        assert!(is_dedupable_empty_password_login(&item));
+    }
+
+    #[test]
+    fn empty_pw_filter_accepts_host_only_signal() {
+        // The `heatledger.com` group from the validation file: empty
+        // username, single URL.
+        let item = with_uris(empty_pw_login("Heat", ""), &["https://heatledger.com/"]);
+        assert!(is_dedupable_empty_password_login(&item));
+    }
+
+    #[test]
+    fn empty_pw_filter_accepts_fido2_only_signal() {
+        let mut item = empty_pw_login("Passkey", "");
+        item["login"]["fido2Credentials"] = json!([{"credentialId": "pk-1"}]);
+        assert!(is_dedupable_empty_password_login(&item));
     }
 
     #[test]

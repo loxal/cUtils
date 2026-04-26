@@ -273,8 +273,7 @@ pub(crate) fn parse_apple_passwords_csv(text: &str) -> Result<Vec<AppleRow>, Str
     let mut rows = raw_parse_csv(text)?;
     if rows.is_empty() {
         return Err(
-            "iCloud CSV is empty — expected an Apple Passwords header row plus data."
-                .to_string(),
+            "iCloud CSV is empty — expected an Apple Passwords header row plus data.".to_string(),
         );
     }
     let header = rows.remove(0);
@@ -371,7 +370,8 @@ fn raw_parse_csv(text: &str) -> Result<Vec<Vec<String>>, String> {
     // rather than silently accept a field that was never closed.
     if in_quotes {
         return Err(
-            "iCloud CSV ends inside a quoted field — malformed export (unterminated quote).".to_string(),
+            "iCloud CSV ends inside a quoted field — malformed export (unterminated quote)."
+                .to_string(),
         );
     }
     // Flush any unterminated final line.
@@ -447,7 +447,10 @@ mod tests {
         let csv = "Title,URL,Username,Password,Notes\n\
                    GitHub,https://github.com,alex,pw,a note\n";
         let err = parse_apple_passwords_csv(csv).unwrap_err();
-        assert!(err.contains("otpauth"), "error must name the missing column; got {err:?}");
+        assert!(
+            err.contains("otpauth"),
+            "error must name the missing column; got {err:?}"
+        );
     }
 
     #[test]
@@ -587,7 +590,11 @@ mod tests {
         assert_eq!(stats.csv_items_appended, 2);
         let items = export["items"].as_array().unwrap();
         // 1 existing + 2 CSV = 3 items; GitHub duplicate routed to Trash.
-        assert_eq!(items.len(), 3, "all items preserved (trashed stay in output)");
+        assert_eq!(
+            items.len(),
+            3,
+            "all items preserved (trashed stay in output)"
+        );
         let living: Vec<&Value> = items
             .iter()
             .filter(|i| i["deletedDate"].is_null())
@@ -700,8 +707,9 @@ mod tests {
             "Bitwarden-only item must stay living — never auto-trashed on merge"
         );
         assert!(
-            items.iter().any(|i| i["name"].as_str() == Some("OtherSite")
-                && i["deletedDate"].is_null()),
+            items
+                .iter()
+                .any(|i| i["name"].as_str() == Some("OtherSite") && i["deletedDate"].is_null()),
             "CSV-only item must be added as living"
         );
     }
@@ -737,15 +745,19 @@ mod tests {
             .iter()
             .find(|i| i["id"].as_str() == Some("bw-note"))
             .expect("Bitwarden secure note must still be in output");
-        assert_eq!(*survivor, bw_note,
-            "different bodies must leave the BW note untouched");
+        assert_eq!(
+            *survivor, bw_note,
+            "different bodies must leave the BW note untouched"
+        );
         // CSV row landed as its own living item.
         let csv_item = items
             .iter()
             .find(|i| i["id"].as_str().unwrap_or("").starts_with("apple-csv-"))
             .expect("CSV secure note must be in output");
-        assert!(csv_item["deletedDate"].is_null(),
-            "CSV note must stay living since its body differs from the BW note");
+        assert!(
+            csv_item["deletedDate"].is_null(),
+            "CSV note must stay living since its body differs from the BW note"
+        );
     }
 
     #[test]

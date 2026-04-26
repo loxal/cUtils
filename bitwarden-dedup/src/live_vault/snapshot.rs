@@ -202,8 +202,8 @@ pub fn write_forensic(path: &Path, sync_body: &str) -> Result<ForensicSnapshot, 
         key: Option<String>,
     }
 
-    let counts: CountOnly = serde_json::from_str(sync_body)
-        .map_err(|e| SnapshotError::NotJson { source: e })?;
+    let counts: CountOnly =
+        serde_json::from_str(sync_body).map_err(|e| SnapshotError::NotJson { source: e })?;
 
     let key_present = counts
         .profile
@@ -474,7 +474,10 @@ mod tests {
         let dir = PathBuf::from("/tmp/scratch/vault");
         let p = forensic_snapshot_path(&dir);
         let name = p.file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("bitwarden_encrypted-export_"), "got {name}");
+        assert!(
+            name.starts_with("bitwarden_encrypted-export_"),
+            "got {name}"
+        );
         assert!(name.ends_with(".json"));
         let stem = name
             .trim_start_matches("bitwarden_encrypted-export_")
@@ -482,7 +485,11 @@ mod tests {
         // Audit fix: 17 digits = YYYYMMDDHHMMSSmmm (millisecond
         // precision). Two snapshots in the same second no longer
         // collide.
-        assert_eq!(stem.len(), 17, "expected 17-digit ms-precision stem, got {stem}");
+        assert_eq!(
+            stem.len(),
+            17,
+            "expected 17-digit ms-precision stem, got {stem}"
+        );
         assert!(stem.chars().all(|c| c.is_ascii_digit()));
     }
 
@@ -566,10 +573,7 @@ mod tests {
 
     #[test]
     fn write_forensic_refuses_non_vault_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "bwd-snapshot-novault-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("bwd-snapshot-novault-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join(VALID_NAME);
         let body = r#"{"ciphers":[{"id":"a"}]}"#;
@@ -590,12 +594,19 @@ mod tests {
         let parent = std::env::temp_dir().join(format!(
             "bwd-snapshot-dotdot-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(parent.join("vault")).unwrap();
         fs::create_dir_all(parent.join("examples")).unwrap();
         // path component sequence: parent / vault / .. / examples / VALID_NAME
-        let bad = parent.join("vault").join("..").join("examples").join(VALID_NAME);
+        let bad = parent
+            .join("vault")
+            .join("..")
+            .join("examples")
+            .join(VALID_NAME);
         let err = write_forensic(&bad, r#"{"ciphers":[{"id":"a"}]}"#).unwrap_err();
         match err {
             SnapshotError::InvalidPath { reason, .. } => {
@@ -613,10 +624,10 @@ mod tests {
             "anything.json",
             "bitwarden_encrypted-export_.json",
             "bitwarden_encrypted-export_abc.json",
-            "bitwarden_encrypted-export_2026.json",            // 4 digits
+            "bitwarden_encrypted-export_2026.json", // 4 digits
             "bitwarden_encrypted-export_2026042500000012.json", // 16 digits
             "bitwarden_decrypted-export_20260425000000.json", // wrong prefix
-            "bitwarden_encrypted-export_20260425000000.txt",   // wrong ext
+            "bitwarden_encrypted-export_20260425000000.txt", // wrong ext
         ];
         for n in bad_names {
             let p = dir.join(n);
@@ -659,7 +670,10 @@ mod tests {
         let path = dir.join(VALID_NAME);
         let err = write_forensic(&path, "not-json-at-all").unwrap_err();
         assert!(matches!(err, SnapshotError::NotJson { .. }));
-        assert!(!path.exists(), "snapshot must not be written when body is non-JSON");
+        assert!(
+            !path.exists(),
+            "snapshot must not be written when body is non-JSON"
+        );
         let _ = fs::remove_dir_all(dir.parent().unwrap());
     }
 
@@ -693,9 +707,18 @@ mod tests {
         let path = dir.join(VALID_NAME);
         let cases: &[(&str, &str)] = &[
             ("missing profile field", r#"{"ciphers":[{"id":"a"}]}"#),
-            ("empty profile object", r#"{"profile":{},"ciphers":[{"id":"a"}]}"#),
-            ("null profile.key", r#"{"profile":{"key":null},"ciphers":[{"id":"a"}]}"#),
-            ("empty string profile.key", r#"{"profile":{"key":""},"ciphers":[{"id":"a"}]}"#),
+            (
+                "empty profile object",
+                r#"{"profile":{},"ciphers":[{"id":"a"}]}"#,
+            ),
+            (
+                "null profile.key",
+                r#"{"profile":{"key":null},"ciphers":[{"id":"a"}]}"#,
+            ),
+            (
+                "empty string profile.key",
+                r#"{"profile":{"key":""},"ciphers":[{"id":"a"}]}"#,
+            ),
         ];
         for (label, body) in cases {
             let err = write_forensic(&path, body).unwrap_err();
@@ -703,7 +726,10 @@ mod tests {
                 matches!(err, SnapshotError::MissingProfileKey),
                 "case `{label}` did not report MissingProfileKey, got: {err:?}"
             );
-            assert!(!path.exists(), "no snapshot must be written when profile.key is missing");
+            assert!(
+                !path.exists(),
+                "no snapshot must be written when profile.key is missing"
+            );
         }
         let _ = fs::remove_dir_all(dir.parent().unwrap());
     }
@@ -799,7 +825,10 @@ mod tests {
         let body = serde_json::json!({"items": [{"id": "a"}]});
         write_recoverable(&path, &body).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "decrypted snapshot is plaintext-sensitive — must be 0o600");
+        assert_eq!(
+            mode, 0o600,
+            "decrypted snapshot is plaintext-sensitive — must be 0o600"
+        );
         let _ = fs::remove_dir_all(dir.parent().unwrap());
     }
 
@@ -868,9 +897,15 @@ mod tests {
 
     #[test]
     fn filename_matches_pattern_unit() {
-        assert!(filename_matches_pattern("bitwarden_encrypted-export_20260425000000.json"));
-        assert!(filename_matches_pattern("bitwarden_encrypted-export_20260425000000123.json"));
-        assert!(!filename_matches_pattern("bitwarden_encrypted-export_2026.json"));
+        assert!(filename_matches_pattern(
+            "bitwarden_encrypted-export_20260425000000.json"
+        ));
+        assert!(filename_matches_pattern(
+            "bitwarden_encrypted-export_20260425000000123.json"
+        ));
+        assert!(!filename_matches_pattern(
+            "bitwarden_encrypted-export_2026.json"
+        ));
         assert!(!filename_matches_pattern("anything.json"));
         assert!(!filename_matches_pattern(
             "bitwarden_encrypted-export_a0260425000000.json" // non-digit

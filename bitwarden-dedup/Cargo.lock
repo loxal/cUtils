@@ -139,6 +139,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tokio",
+ "url",
  "wiremock",
  "zeroize",
 ]

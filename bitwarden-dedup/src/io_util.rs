@@ -61,11 +61,7 @@ pub fn write_sensitive_atomic_no_clobber(path: &Path, content: &str) -> io::Resu
     write_sensitive_atomic_inner(path, content, true)
 }
 
-fn write_sensitive_atomic_inner(
-    path: &Path,
-    content: &str,
-    no_clobber: bool,
-) -> io::Result<()> {
+fn write_sensitive_atomic_inner(path: &Path, content: &str, no_clobber: bool) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     if !parent.as_os_str().is_empty() {
         fs::create_dir_all(parent)?;

@@ -50,6 +50,16 @@ struct Cli {
     /// landing on the survivor. Losers stay in Trash regardless.
     #[arg(long)]
     split_divergent_totps: bool,
+
+    /// Run a second login-dedup pass over credential-less stubs (empty
+    /// `login.password`) that the strict pass deliberately skips. Items
+    /// only group when name + organization + username + URI host set +
+    /// fido2 signature all match AND the group has at least one
+    /// identifying signal beyond its name (non-empty username, non-empty
+    /// URI host set, or a fido2 credential). Losers route to the trash
+    /// sidecar like every other dedup loser. Off by default.
+    #[arg(long)]
+    collapse_empty_passwords: bool,
 }
 
 fn main() -> ExitCode {
@@ -100,6 +110,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // error instead of a plausible-looking no-op output.
     let config = DedupConfig {
         split_divergent_totps: cli.split_divergent_totps,
+        collapse_empty_passwords: cli.collapse_empty_passwords,
     };
     let stats = dedup_export_with_config(&mut data, &config)?;
 
@@ -127,6 +138,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "trashed_sidecar": trashed_sidecar,
         "trashed_sidecar_item_count": trashed_count,
         "split_divergent_totps": config.split_divergent_totps,
+        "collapse_empty_passwords": config.collapse_empty_passwords,
         "input_item_count": stats.total,
         "output_item_count": stats.output,
         "living_item_count": stats.living,
@@ -134,6 +146,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // Back-compat alias — older consumers of the audit JSON look for this field.
         "removed_count": stats.trashed,
         "duplicate_groups": stats.groups,
+        "strict_login_groups": stats.strict_login_groups,
+        "empty_password_groups": stats.empty_password_groups,
+        "empty_password_trashed": stats.empty_password_trashed,
+        "empty_password_groups_by_signal": stats.empty_password_groups_by_signal,
+        "secure_note_groups": stats.secure_note_groups,
+        "ssh_key_groups": stats.ssh_key_groups,
         "totp_conflict_groups": stats.totp_conflict_groups,
         "folders_deduplicated": stats.folders_deduplicated,
         "skipped_from_dedup": stats.skipped,
@@ -147,7 +165,38 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "               {} items total, {} skipped from dedup",
         stats.total, stats.skipped
     );
-    println!("Groups:        {} strict duplicate groups", stats.groups);
+    println!("Groups:        {} total dedup groups", stats.groups);
+    if stats.strict_login_groups > 0 {
+        println!(
+            "                 strict login: {}",
+            stats.strict_login_groups
+        );
+    }
+    if stats.empty_password_groups > 0 {
+        let signals = &stats.empty_password_groups_by_signal;
+        let f = signals
+            .get(&bitwarden_dedup::SignalKind::Fido2)
+            .copied()
+            .unwrap_or(0);
+        let h = signals
+            .get(&bitwarden_dedup::SignalKind::Host)
+            .copied()
+            .unwrap_or(0);
+        let u = signals
+            .get(&bitwarden_dedup::SignalKind::UsernameOnly)
+            .copied()
+            .unwrap_or(0);
+        println!(
+            "                 empty-password login: {} (signals — fido2: {}, host: {}, username-only: {})",
+            stats.empty_password_groups, f, h, u
+        );
+    }
+    if stats.secure_note_groups > 0 {
+        println!("                 secure note: {}", stats.secure_note_groups);
+    }
+    if stats.ssh_key_groups > 0 {
+        println!("                 ssh key: {}", stats.ssh_key_groups);
+    }
     if stats.folders_deduplicated > 0 {
         println!(
             "Folders:       {} duplicate folder(s) collapsed; every item's folderId remapped to the surviving folder.",
@@ -160,18 +209,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "!! TOTP CONFLICT: {} group(s) had >1 distinct non-empty TOTP. The",
             stats.totp_conflict_groups
         );
-        println!(
-            "   newest-by-revisionDate secret is on the survivor; the older ones"
-        );
-        println!(
-            "   are in Trash. If you do NOT trust that heuristic for this vault,"
-        );
-        println!(
-            "   rerun `just dedup-split-totps` (or pass --split-divergent-totps)"
-        );
-        println!(
-            "   to keep divergent-TOTP items as separate living entries. Audit"
-        );
+        println!("   newest-by-revisionDate secret is on the survivor; the older ones");
+        println!("   are in Trash. If you do NOT trust that heuristic for this vault,");
+        println!("   rerun `just dedup-split-totps` (or pass --split-divergent-totps)");
+        println!("   to keep divergent-TOTP items as separate living entries. Audit");
         println!("   records for each group carry `totp_conflict: true`.");
         println!();
     }
@@ -179,6 +220,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "Trashed:       {} items routed out of the active `items` array (survivor picked by longer passwordHistory, then newer revisionDate)",
         stats.trashed
     );
+    if stats.empty_password_groups > 0 {
+        println!();
+        println!(
+            "Empty-pw pass: {} groups, {} items routed to trash.",
+            stats.empty_password_groups, stats.empty_password_trashed
+        );
+        println!("               Grouped by name + organization + username + URI host");
+        println!("               set + fido2 set. Username-only groups (signal_kind");
+        println!("               == \"username_only\") are the weakest evidence class —");
+        println!("               review the audit JSON filtered on that field if you");
+        println!("               want to spot-check them. Items had no password set;");
+        println!("               full merge rules apply (URIs/notes/fields union onto");
+        println!("               survivor).");
+        println!();
+    }
     println!(
         "URIs merged:   {} unique URLs preserved from dropped items",
         stats.merged
@@ -206,18 +262,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("Audit:         {}", audit_path.display());
     println!();
-    println!(
-        "!! IMPORT WORKFLOW — follow every step or you WILL see duplicates !!"
-    );
-    println!(
-        "   Bitwarden's Import is purely ADDITIVE: it never dedupes against"
-    );
-    println!(
-        "   your existing vault. Skip the Purge step and every item already"
-    );
-    println!(
-        "   in your vault appears twice."
-    );
+    println!("!! IMPORT WORKFLOW — follow every step or you WILL see duplicates !!");
+    println!("   Bitwarden's Import is purely ADDITIVE: it never dedupes against");
+    println!("   your existing vault. Skip the Purge step and every item already");
+    println!("   in your vault appears twice.");
     println!();
     println!("  1. Back up your current vault (keep the original export file).");
     println!("  2. Settings -> My Account -> Purge Vault.");
@@ -288,7 +336,10 @@ fn split_items_to_sidecar(data: &mut Value, trashed_path: &Path) -> Result<usize
         // the kind of thing an operator imports by mistake.
         if trashed_path.exists() {
             fs::remove_file(trashed_path).map_err(|e| {
-                format!("removing stale trash sidecar {}: {e}", trashed_path.display())
+                format!(
+                    "removing stale trash sidecar {}: {e}",
+                    trashed_path.display()
+                )
             })?;
         }
     }
@@ -427,7 +478,10 @@ mod tests {
             Path::new("/tmp/same.json"),
             false,
         );
-        assert!(r.is_err(), "trash-sidecar vs --output collision must be caught");
+        assert!(
+            r.is_err(),
+            "trash-sidecar vs --output collision must be caught"
+        );
     }
 
     #[test]
@@ -493,5 +547,4 @@ mod tests {
 
     // Low-level write_sensitive_atomic has its own unit tests in
     // `src/io_util.rs`; we don't re-prove 0o600 behavior from main.rs.
-
 }

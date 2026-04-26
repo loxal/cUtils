@@ -147,7 +147,10 @@ pub enum AuthError {
     HttpStatus { status: u16, body: String },
     /// Server returned 2xx but the body wasn't a valid token
     /// response. Body included.
-    MalformedResponse { body: String, source: serde_json::Error },
+    MalformedResponse {
+        body: String,
+        source: serde_json::Error,
+    },
 }
 
 impl std::fmt::Display for AuthError {
@@ -378,9 +381,7 @@ pub(crate) const CLIENT_VERSION_VALUE: &str = env!("CARGO_PKG_VERSION");
 /// **Refusal:** if `<vault_dir>` doesn't exist, returns an error
 /// (mirrors the binary's vault-required posture so we don't
 /// scatter `.device_id` files across the filesystem).
-pub fn persistent_device_identifier(
-    vault_dir: &std::path::Path,
-) -> Result<String, std::io::Error> {
+pub fn persistent_device_identifier(vault_dir: &std::path::Path) -> Result<String, std::io::Error> {
     if !vault_dir.is_dir() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -429,10 +430,22 @@ fn generate_uuid_v4_from_urandom() -> Result<String, std::io::Error> {
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Ok(format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11],
-        bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
     ))
 }
 
@@ -528,7 +541,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let creds = ApiKeyCredentials::new("user.test-client-id".to_string(), "test-client-secret".to_string());
+        let creds = ApiKeyCredentials::new(
+            "user.test-client-id".to_string(),
+            "test-client-secret".to_string(),
+        );
         let client = reqwest::Client::new();
         let token = acquire_access_token_at_url(
             &client,
@@ -550,8 +566,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/connect/token"))
             .respond_with(
-                ResponseTemplate::new(400)
-                    .set_body_string(r#"{"error":"invalid_client"}"#),
+                ResponseTemplate::new(400).set_body_string(r#"{"error":"invalid_client"}"#),
             )
             .mount(&server)
             .await;
@@ -613,9 +628,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/connect/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"access_token":"no-expiry-token"}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(r#"{"access_token":"no-expiry-token"}"#),
+            )
             .mount(&server)
             .await;
 
@@ -632,7 +647,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(token.header_value(), "Bearer no-expiry-token");
-        assert!(token.is_expired(), "missing expires_in must be treated as expired");
+        assert!(
+            token.is_expired(),
+            "missing expires_in must be treated as expired"
+        );
     }
 
     #[test]
@@ -659,7 +677,10 @@ mod tests {
             !rendered.contains("SUPER-SECRET-BEARER-VALUE"),
             "Display leaked bearer: {rendered}"
         );
-        assert!(rendered.contains("<redacted>"), "expected redaction marker in: {rendered}");
+        assert!(
+            rendered.contains("<redacted>"),
+            "expected redaction marker in: {rendered}"
+        );
         // Non-secret context should survive so the error remains debuggable.
         assert!(rendered.contains("api"));
     }
@@ -887,9 +908,10 @@ mod tests {
             .and(path("/connect/token"))
             .and(header_exists("Bitwarden-Client-Name"))
             .and(header_exists("Bitwarden-Client-Version"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"access_token":"x","expires_in":3600}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"access_token":"x","expires_in":3600}"#),
+            )
             .mount(&server)
             .await;
 
@@ -922,9 +944,10 @@ mod tests {
             .and(path("/connect/token"))
             .and(body_string_contains("grant_type=client_credentials"))
             .and(body_string_contains("scope=api"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"access_token":"x","expires_in":3600}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"access_token":"x","expires_in":3600}"#),
+            )
             .mount(&server)
             .await;
 

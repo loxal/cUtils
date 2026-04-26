@@ -197,13 +197,9 @@ pub fn derive_master_key(
             let salt_sha = Sha256::new_with_prefix(normalized_email.as_bytes()).finalize();
             // sdk-internal converts MiB → KiB before passing to argon2.
             let memory_kib = memory_mib.get().saturating_mul(1024);
-            let argon_params = argon2::Params::new(
-                memory_kib,
-                iterations.get(),
-                parallelism.get(),
-                Some(32),
-            )
-            .map_err(CryptoError::Argon2)?;
+            let argon_params =
+                argon2::Params::new(memory_kib, iterations.get(), parallelism.get(), Some(32))
+                    .map_err(CryptoError::Argon2)?;
             let argon = argon2::Argon2::new(
                 argon2::Algorithm::Argon2id,
                 argon2::Version::V0x13,
@@ -376,8 +372,8 @@ impl EncString {
 /// Skipping step 1 or doing step 2 with `==` is the #1 historical
 /// implementation bug. `subtle::ConstantTimeEq` is mandatory.
 pub fn decrypt(enc: &EncString, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError> {
-    let mut hmac = HmacSha256::new_from_slice(&key.mac)
-        .expect("HMAC-SHA256 accepts any key length");
+    let mut hmac =
+        HmacSha256::new_from_slice(&key.mac).expect("HMAC-SHA256 accepts any key length");
     hmac.update(&enc.iv);
     hmac.update(&enc.data);
     let expected_mac = hmac.finalize().into_bytes();

@@ -383,8 +383,8 @@ fn load_fixture_items() -> Vec<Value> {
     let path = fixture_path();
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    let mut data: Value = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
+    let mut data: Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
     match data.as_object_mut().and_then(|o| o.get_mut("items")) {
         Some(Value::Array(arr)) => std::mem::take(arr),
         _ => panic!("fixture has no 'items' array"),
@@ -429,7 +429,10 @@ fn example_fixture_counts_match_readme() {
     assert_eq!(stats.total, 22, "total items in the curated fixture");
     assert_eq!(stats.skipped, 7, "items skipped from dedup");
     assert_eq!(stats.groups, 5, "strict duplicate groups");
-    assert_eq!(stats.trashed, 6, "items routed to Bitwarden Trash by this run");
+    assert_eq!(
+        stats.trashed, 6,
+        "items routed to Bitwarden Trash by this run"
+    );
     assert_eq!(stats.merged, 3, "URIs merged into kept items");
     // Output keeps every input item (losers become trashed, not removed).
     assert_eq!(stats.output, 22);
@@ -437,7 +440,10 @@ fn example_fixture_counts_match_readme() {
     // Fixture includes one item with `deletedDate` set at the source, so
     // total trashed in the output = 6 (new) + 1 (pre-existing) = 7, and
     // living items = 22 - 7 = 15.
-    assert_eq!(stats.living, 15, "living items = total - already-trashed - newly-trashed");
+    assert_eq!(
+        stats.living, 15,
+        "living items = total - already-trashed - newly-trashed"
+    );
 }
 
 #[test]
@@ -635,8 +641,7 @@ fn is_synthetic_uuid(s: &str) -> bool {
     s.len() == 36
         && s.starts_with("00000000-0000-0000-")
         && s.chars().filter(|&c| c == '-').count() == 4
-        && s.chars()
-            .all(|c| c == '-' || c.is_ascii_hexdigit())
+        && s.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
 
 fn is_iso_date(s: &str) -> bool {
@@ -648,9 +653,9 @@ fn is_iso_date(s: &str) -> bool {
         && s.as_bytes().get(13) == Some(&b':')
         && s.as_bytes().get(16) == Some(&b':')
         && s.ends_with('Z')
-        && s.chars().enumerate().all(|(i, c)| {
-            matches!(i, 4 | 7 | 10 | 13 | 16 | 19) || c.is_ascii_digit()
-        })
+        && s.chars()
+            .enumerate()
+            .all(|(i, c)| matches!(i, 4 | 7 | 10 | 13 | 16 | 19) || c.is_ascii_digit())
 }
 
 #[test]
@@ -683,7 +688,9 @@ mod allowlist_unit_tests {
         assert!(is_allowed_string("redacted-totp-seed-08"));
         assert!(is_allowed_string("https://service01.example.test"));
         assert!(is_allowed_string("https://service03.example.test/primary"));
-        assert!(is_allowed_string("https://service03.example.test/secondary"));
+        assert!(is_allowed_string(
+            "https://service03.example.test/secondary"
+        ));
         assert!(is_allowed_string("http://service01.example.test"));
         assert!(is_allowed_string("androidapp://com.example.service04"));
         assert!(is_allowed_string("00000000-0000-0000-0000-000000000017"));
@@ -722,7 +729,9 @@ mod allowlist_unit_tests {
         // Only androidapp://com.example.service<digits> is allowed, so
         // anything resembling a real package name is rejected.
         assert!(!is_allowed_string("androidapp://com.example.github"));
-        assert!(!is_allowed_string("androidapp://com.example.service_github"));
+        assert!(!is_allowed_string(
+            "androidapp://com.example.service_github"
+        ));
     }
 
     #[test]

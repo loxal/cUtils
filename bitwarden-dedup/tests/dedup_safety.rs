@@ -21,11 +21,17 @@ use bitwarden_dedup::{DedupConfig, dedup_export, dedup_items, dedup_items_with_c
 use serde_json::{Value, json};
 
 fn living(items: &[Value]) -> Vec<&Value> {
-    items.iter().filter(|i| i["deletedDate"].is_null()).collect()
+    items
+        .iter()
+        .filter(|i| i["deletedDate"].is_null())
+        .collect()
 }
 
 fn trashed(items: &[Value]) -> Vec<&Value> {
-    items.iter().filter(|i| !i["deletedDate"].is_null()).collect()
+    items
+        .iter()
+        .filter(|i| !i["deletedDate"].is_null())
+        .collect()
 }
 
 #[test]
@@ -251,9 +257,13 @@ fn split_divergent_totps_opt_in_keeps_items_separate() {
         &mut items,
         &DedupConfig {
             split_divergent_totps: true,
+            ..Default::default()
         },
     );
-    assert_eq!(stats.trashed, 0, "divergent TOTPs must stay separate under opt-in");
+    assert_eq!(
+        stats.trashed, 0,
+        "divergent TOTPs must stay separate under opt-in"
+    );
     assert_eq!(living(&items).len(), 2);
     // Every TOTP is reachable on a living item — nothing is at risk of
     // being overwritten by a wrong survivor pick.
@@ -330,8 +340,11 @@ fn same_name_secure_notes_collapse_with_identical_body_deduped() {
     assert_eq!(stats.trashed, 1);
     let alive = living(&items);
     assert_eq!(alive.len(), 1);
-    assert_eq!(alive[0]["notes"].as_str(), Some("codes"),
-        "identical bodies should not produce a merge banner");
+    assert_eq!(
+        alive[0]["notes"].as_str(),
+        Some("codes"),
+        "identical bodies should not produce a merge banner"
+    );
     assert_eq!(trashed(&items).len(), 1, "loser preserved in Trash");
 }
 
@@ -383,7 +396,10 @@ fn personal_and_org_secure_notes_never_cross_dedup() {
         }),
     ];
     let stats = dedup_items(&mut items);
-    assert_eq!(stats.trashed, 0, "personal and org notes must not cross-dedup");
+    assert_eq!(
+        stats.trashed, 0,
+        "personal and org notes must not cross-dedup"
+    );
     assert_eq!(living(&items).len(), 2);
 }
 
@@ -443,7 +459,10 @@ fn secure_notes_and_logins_with_same_name_do_not_collide() {
         }),
     ];
     let stats = dedup_items(&mut items);
-    assert_eq!(stats.trashed, 0, "login/note cross-type grouping must not happen");
+    assert_eq!(
+        stats.trashed, 0,
+        "login/note cross-type grouping must not happen"
+    );
     assert_eq!(living(&items).len(), 2);
 }
 
@@ -549,7 +568,10 @@ fn ssh_keys_with_identical_material_collapse() {
     // Longest name wins on the merged record.
     assert_eq!(alive[0]["name"].as_str(), Some("laptop-ed25519"));
     // Key material untouched.
-    assert_eq!(alive[0]["sshKey"]["keyFingerprint"].as_str(), Some("SHA256:abcd1234"));
+    assert_eq!(
+        alive[0]["sshKey"]["keyFingerprint"].as_str(),
+        Some("SHA256:abcd1234")
+    );
 }
 
 #[test]
@@ -577,7 +599,10 @@ fn ssh_keys_with_different_private_keys_never_merge() {
         }),
     ];
     let stats = dedup_items(&mut items);
-    assert_eq!(stats.trashed, 0, "divergent SSH private keys must never merge");
+    assert_eq!(
+        stats.trashed, 0,
+        "divergent SSH private keys must never merge"
+    );
     assert_eq!(living(&items).len(), 2);
 }
 
@@ -620,10 +645,7 @@ fn duplicate_folders_collapse_and_folder_ids_remap() {
     // Two unique folder names remain: `main` and `work`.
     let folders = export["folders"].as_array().unwrap();
     assert_eq!(folders.len(), 2);
-    let names: Vec<&str> = folders
-        .iter()
-        .filter_map(|f| f["name"].as_str())
-        .collect();
+    let names: Vec<&str> = folders.iter().filter_map(|f| f["name"].as_str()).collect();
     assert!(names.contains(&"main"));
     assert!(names.contains(&"work"));
     // Items that used to live in folder-b now point at folder-a
@@ -830,9 +852,8 @@ fn fixture_round_trip_preserves_creation_and_revision_for_every_item() {
     // input. This is the regression guard that would have caught a bug
     // where, say, `apply_survivor_patch` accidentally re-stamped
     // revisionDate after merging notes or URIs.
-    let fixture_path =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/bitwarden_export_20260411172632.json");
+    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/bitwarden_export_20260411172632.json");
     let text = std::fs::read_to_string(&fixture_path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", fixture_path.display()));
     let original: Value = serde_json::from_str(&text).unwrap();
@@ -850,8 +871,12 @@ fn fixture_round_trip_preserves_creation_and_revision_for_every_item() {
     let mut creation_diffs = 0usize;
     let mut revision_diffs = 0usize;
     for it in dedup_items_arr {
-        let Some(id) = it["id"].as_str() else { continue };
-        let Some(src) = src_by_id.get(id) else { continue };
+        let Some(id) = it["id"].as_str() else {
+            continue;
+        };
+        let Some(src) = src_by_id.get(id) else {
+            continue;
+        };
         if it["creationDate"] != src["creationDate"] {
             creation_diffs += 1;
             eprintln!(

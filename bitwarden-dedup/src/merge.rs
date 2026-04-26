@@ -286,7 +286,9 @@ fn merge_totp_across_group(keep: &Value, drops: &[&Value]) -> TotpMerge {
 }
 
 fn item_is_favorite(item: &Value) -> bool {
-    item.get("favorite").and_then(Value::as_bool).unwrap_or(false)
+    item.get("favorite")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Everything the pipeline needs to apply to a surviving **secure note**
@@ -545,10 +547,7 @@ fn folder_disambiguation_note(
         if !seen.insert(fid.to_string()) {
             continue;
         }
-        let display = folders
-            .get(fid)
-            .cloned()
-            .unwrap_or_else(|| fid.to_string());
+        let display = folders.get(fid).cloned().unwrap_or_else(|| fid.to_string());
         extras.push(display);
     }
     if extras.is_empty() {

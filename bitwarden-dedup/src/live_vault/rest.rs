@@ -41,13 +41,20 @@ pub const MAX_SYNC_BODY_BYTES: u64 = 256 * 1024 * 1024;
 #[derive(Debug)]
 pub enum SyncError {
     Network(reqwest::Error),
-    Unauthorized { body: String },
-    HttpStatus { status: u16, body: String },
+    Unauthorized {
+        body: String,
+    },
+    HttpStatus {
+        status: u16,
+        body: String,
+    },
     /// Server response is too large to safely buffer. Either the
     /// `Content-Length` header exceeded [`MAX_SYNC_BODY_BYTES`]
     /// (pre-fetch reject) or the decoded body did (post-fetch).
     /// Defensive cap; never observed in practice.
-    ResponseTooLarge { reported_bytes: u64 },
+    ResponseTooLarge {
+        reported_bytes: u64,
+    },
 }
 
 impl std::fmt::Display for SyncError {
@@ -134,8 +141,13 @@ struct PreloginResponse {
 #[derive(Debug)]
 pub enum PreloginError {
     Network(reqwest::Error),
-    HttpStatus { status: u16, body: String },
-    MalformedResponse { body: String },
+    HttpStatus {
+        status: u16,
+        body: String,
+    },
+    MalformedResponse {
+        body: String,
+    },
     /// `kdf` field was neither 0 (PBKDF2) nor 1 (Argon2id).
     UnknownKdfType(i64),
     /// Argon2id account was missing `kdfMemory` or `kdfParallelism`.
@@ -213,7 +225,10 @@ pub async fn fetch_prelogin_at_url(
         .post(&url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header("Bitwarden-Client-Name", super::auth::CLIENT_NAME_VALUE)
-        .header("Bitwarden-Client-Version", super::auth::CLIENT_VERSION_VALUE)
+        .header(
+            "Bitwarden-Client-Version",
+            super::auth::CLIENT_VERSION_VALUE,
+        )
         .body(body_json)
         .send()
         .await
@@ -468,6 +483,9 @@ mod tests {
         let result = fetch_sync_at_url(&reqwest::Client::new(), &server.uri(), &token)
             .await
             .unwrap();
-        assert_eq!(result, weird, "fetch_sync must preserve response bytes verbatim");
+        assert_eq!(
+            result, weird,
+            "fetch_sync must preserve response bytes verbatim"
+        );
     }
 }

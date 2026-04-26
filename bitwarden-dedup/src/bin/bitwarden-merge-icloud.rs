@@ -63,6 +63,13 @@ struct Cli {
     /// Bitwarden side and the merged CSV rows.
     #[arg(long)]
     split_divergent_totps: bool,
+
+    /// Run a second login-dedup pass over credential-less stubs (empty
+    /// `login.password`). Same semantics as `bitwarden-dedup
+    /// --collapse-empty-passwords`; applies to both Bitwarden and CSV
+    /// rows after the merge appends them. Off by default.
+    #[arg(long)]
+    collapse_empty_passwords: bool,
 }
 
 fn main() -> ExitCode {
@@ -91,12 +98,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let trashed_path = suffix_sibling(&bw_path, "-with-icloud-credentials.trashed.json");
 
     check_paths_distinct(
-        &[&bw_path, &csv_path, &output_path, &audit_path, &trashed_path],
+        &[
+            &bw_path,
+            &csv_path,
+            &output_path,
+            &audit_path,
+            &trashed_path,
+        ],
         cli.force,
     )?;
 
-    let bw_text = fs::read_to_string(&bw_path)
-        .map_err(|e| format!("reading {}: {e}", bw_path.display()))?;
+    let bw_text =
+        fs::read_to_string(&bw_path).map_err(|e| format!("reading {}: {e}", bw_path.display()))?;
     let csv_text = fs::read_to_string(&csv_path)
         .map_err(|e| format!("reading {}: {e}", csv_path.display()))?;
 
@@ -121,6 +134,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let config = DedupConfig {
         split_divergent_totps: cli.split_divergent_totps,
+        collapse_empty_passwords: cli.collapse_empty_passwords,
     };
     let stats = merge_icloud_csv_into_export_with_config(&mut export, &csv_text, &config)?;
 
@@ -151,6 +165,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "trashed_sidecar": trashed_sidecar,
         "trashed_sidecar_item_count": trashed_count,
         "split_divergent_totps": config.split_divergent_totps,
+        "collapse_empty_passwords": config.collapse_empty_passwords,
         "csv_rows_total": stats.csv_rows,
         "csv_rows_appended": stats.csv_items_appended,
         "csv_rows_skipped_empty": stats.csv_rows_skipped,
@@ -159,6 +174,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "combined_living_count": dedup.living,
         "combined_trashed_count": dedup.trashed,
         "duplicate_groups": dedup.groups,
+        "strict_login_groups": dedup.strict_login_groups,
+        "empty_password_groups": dedup.empty_password_groups,
+        "empty_password_trashed": dedup.empty_password_trashed,
+        "empty_password_groups_by_signal": dedup.empty_password_groups_by_signal,
+        "secure_note_groups": dedup.secure_note_groups,
+        "ssh_key_groups": dedup.ssh_key_groups,
         "totp_conflict_groups": dedup.totp_conflict_groups,
         "folders_deduplicated": dedup.folders_deduplicated,
         "skipped_from_dedup": dedup.skipped,
@@ -175,9 +196,43 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Combined:        {} items total", dedup.total);
     println!(
-        "Groups:          {} strict duplicate groups across Bitwarden + iCloud",
+        "Groups:          {} total dedup groups across Bitwarden + iCloud",
         dedup.groups
     );
+    if dedup.strict_login_groups > 0 {
+        println!(
+            "                   strict login: {}",
+            dedup.strict_login_groups
+        );
+    }
+    if dedup.empty_password_groups > 0 {
+        let signals = &dedup.empty_password_groups_by_signal;
+        let f = signals
+            .get(&bitwarden_dedup::SignalKind::Fido2)
+            .copied()
+            .unwrap_or(0);
+        let h = signals
+            .get(&bitwarden_dedup::SignalKind::Host)
+            .copied()
+            .unwrap_or(0);
+        let u = signals
+            .get(&bitwarden_dedup::SignalKind::UsernameOnly)
+            .copied()
+            .unwrap_or(0);
+        println!(
+            "                   empty-password login: {} (signals — fido2: {}, host: {}, username-only: {})",
+            dedup.empty_password_groups, f, h, u
+        );
+    }
+    if dedup.secure_note_groups > 0 {
+        println!(
+            "                   secure note: {}",
+            dedup.secure_note_groups
+        );
+    }
+    if dedup.ssh_key_groups > 0 {
+        println!("                   ssh key: {}", dedup.ssh_key_groups);
+    }
     if dedup.folders_deduplicated > 0 {
         println!(
             "Folders:         {} duplicate folder(s) collapsed; every item's folderId was remapped to the surviving folder.",
@@ -190,18 +245,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "!! TOTP CONFLICT: {} group(s) had >1 distinct non-empty TOTP. The",
             dedup.totp_conflict_groups
         );
-        println!(
-            "   newest-by-revisionDate secret is on the survivor; the older ones"
-        );
-        println!(
-            "   are in Trash. If you do NOT trust that heuristic, rerun"
-        );
-        println!(
-            "   `just merge-with-icloud-credentials-csv-split-totps` to keep"
-        );
-        println!(
-            "   divergent-TOTP items as separate living entries. Audit records"
-        );
+        println!("   newest-by-revisionDate secret is on the survivor; the older ones");
+        println!("   are in Trash. If you do NOT trust that heuristic, rerun");
+        println!("   `just merge-with-icloud-credentials-csv-split-totps` to keep");
+        println!("   divergent-TOTP items as separate living entries. Audit records");
         println!("   for each group carry `totp_conflict: true`.");
         println!();
     }
@@ -209,6 +256,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "Trashed:         {} items routed to Bitwarden Trash by this run (CSV + Bitwarden duplicates; deletedDate set — recoverable after import)",
         dedup.trashed
     );
+    if dedup.empty_password_groups > 0 {
+        println!();
+        println!(
+            "Empty-pw pass:   {} groups, {} items routed to trash.",
+            dedup.empty_password_groups, dedup.empty_password_trashed
+        );
+        println!("                 Grouped by name + organization + username + URI host");
+        println!("                 set + fido2 set. Username-only groups (signal_kind");
+        println!("                 == \"username_only\") are the weakest evidence class —");
+        println!("                 review the audit JSON filtered on that field if you");
+        println!("                 want to spot-check them. Items had no password set;");
+        println!("                 full merge rules apply (URIs/notes/fields union onto");
+        println!("                 survivor).");
+        println!();
+    }
     println!(
         "URIs merged:     {} unique URLs preserved from dropped items",
         dedup.merged
@@ -249,25 +311,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Any passkey / FIDO2 credential that already exists on the Bitwarden");
     println!("  side is preserved untouched.");
     println!();
-    println!(
-        "!! IMPORT WORKFLOW — follow every step or you WILL see duplicates !!"
-    );
-    println!(
-        "   Bitwarden's Import feature is purely ADDITIVE: it never dedupes"
-    );
-    println!(
-        "   against your existing vault. Skipping the Purge step below means"
-    );
-    println!(
-        "   the imported items land on top of what's already there, and every"
-    );
-    println!(
-        "   item you already had will appear twice in the Bitwarden UI."
-    );
+    println!("!! IMPORT WORKFLOW — follow every step or you WILL see duplicates !!");
+    println!("   Bitwarden's Import feature is purely ADDITIVE: it never dedupes");
+    println!("   against your existing vault. Skipping the Purge step below means");
+    println!("   the imported items land on top of what's already there, and every");
+    println!("   item you already had will appear twice in the Bitwarden UI.");
     println!();
-    println!(
-        "  1. Back up your current vault (keep the original export file)."
-    );
+    println!("  1. Back up your current vault (keep the original export file).");
     println!("  2. Bitwarden web vault → Settings → My Account → Purge Vault.");
     println!("     (This empties your vault. It is load-bearing.)");
     println!(
@@ -277,12 +327,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default()
             .to_string_lossy()
     );
-    println!(
-        "  4. Do NOT also import the .trashed.json sidecar unless you"
-    );
-    println!(
-        "     specifically want to populate Bitwarden's Trash folder."
-    );
+    println!("  4. Do NOT also import the .trashed.json sidecar unless you");
+    println!("     specifically want to populate Bitwarden's Trash folder.");
 
     Ok(())
 }
@@ -415,4 +461,3 @@ fn check_paths_distinct(paths: &[&Path], force: bool) -> Result<(), String> {
         collisions.join("; ")
     ))
 }
-

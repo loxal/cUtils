@@ -18,8 +18,8 @@
 use std::num::NonZeroU32;
 
 use bitwarden_dedup::live_vault::crypto::{
-    EncString, KdfParams, MasterKey, SymmetricKey, decrypt, decrypt_to_string,
-    derive_master_key, stretch_master_key,
+    EncString, KdfParams, MasterKey, SymmetricKey, decrypt, decrypt_to_string, derive_master_key,
+    stretch_master_key,
 };
 use secrecy::SecretString;
 
@@ -63,8 +63,8 @@ fn pbkdf2_master_key_at_audit_iterations_matches_sdk_internal_vector() {
     pbkdf2::pbkdf2::<HmacSha256>(password, email.as_bytes(), 10_000, &mut out).unwrap();
 
     let expected: [u8; 32] = [
-        31, 79, 104, 226, 150, 71, 177, 90, 194, 80, 172, 209, 17, 129, 132, 81, 138, 167, 69,
-        167, 254, 149, 2, 27, 39, 197, 64, 42, 22, 195, 86, 75,
+        31, 79, 104, 226, 150, 71, 177, 90, 194, 80, 172, 209, 17, 129, 132, 81, 138, 167, 69, 167,
+        254, 149, 2, 27, 39, 197, 64, 42, 22, 195, 86, 75,
     ];
     assert_eq!(
         out, expected,
@@ -109,8 +109,8 @@ fn argon2id_master_key_matches_sdk_internal_vector() {
     let mk = derive_master_key(&pw, "test_key", params).unwrap();
 
     let expected: [u8; 32] = [
-        207, 240, 225, 177, 162, 19, 163, 76, 98, 106, 179, 175, 224, 9, 17, 240, 20, 147, 237,
-        47, 246, 150, 141, 184, 62, 225, 131, 242, 51, 53, 225, 242,
+        207, 240, 225, 177, 162, 19, 163, 76, 98, 106, 179, 175, 224, 9, 17, 240, 20, 147, 237, 47,
+        246, 150, 141, 184, 62, 225, 131, 242, 51, 53, 225, 242,
     ];
     assert_eq!(
         mk.as_bytes(),
@@ -138,8 +138,8 @@ fn hkdf_stretch_master_key_matches_sdk_internal_vector() {
     // The master_key here is the same one PBKDF2 produced above —
     // chained, by design, to lock in the whole derivation pipeline.
     let master_key_bytes: [u8; 32] = [
-        31, 79, 104, 226, 150, 71, 177, 90, 194, 80, 172, 209, 17, 129, 132, 81, 138, 167, 69,
-        167, 254, 149, 2, 27, 39, 197, 64, 42, 22, 195, 86, 75,
+        31, 79, 104, 226, 150, 71, 177, 90, 194, 80, 172, 209, 17, 129, 132, 81, 138, 167, 69, 167,
+        254, 149, 2, 27, 39, 197, 64, 42, 22, 195, 86, 75,
     ];
 
     // Production code only ever produces a MasterKey via
@@ -202,7 +202,10 @@ fn aes_cbc_hmac_decrypt_rejects_tampered_mac() {
     // run constant-time. Any one-bit flip in the MAC must reject.
     let key = symmetric_key_from_split([0u8; 32], [0xffu8; 32]);
     let (original, original_str) = encrypt_for_test(&key, &TEST_IV, b"some plaintext");
-    assert!(decrypt(&original, &key).is_ok(), "sanity: original decrypts");
+    assert!(
+        decrypt(&original, &key).is_ok(),
+        "sanity: original decrypts"
+    );
 
     let tampered = EncString::parse(&flip_one_bit_in_mac(&original_str)).unwrap();
     let err = decrypt(&tampered, &key).unwrap_err();
@@ -272,11 +275,7 @@ fn symmetric_key_from_split(enc: [u8; 32], mac: [u8; 32]) -> SymmetricKey {
 /// (AES-256-CBC + HMAC-SHA256), with a fixed caller-supplied IV
 /// for determinism. Returns both the parsed `EncString` and its
 /// wire-format string so tamper tests can flip bits and reparse.
-fn encrypt_for_test(
-    key: &SymmetricKey,
-    iv: &[u8; 16],
-    plaintext: &[u8],
-) -> (EncString, String) {
+fn encrypt_for_test(key: &SymmetricKey, iv: &[u8; 16], plaintext: &[u8]) -> (EncString, String) {
     use aes::Aes256;
     use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
     use base64::Engine;

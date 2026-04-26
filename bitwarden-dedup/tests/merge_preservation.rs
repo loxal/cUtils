@@ -20,7 +20,10 @@ use bitwarden_dedup::{dedup_export, dedup_items};
 use serde_json::{Value, json};
 
 fn living(items: &[Value]) -> Vec<&Value> {
-    items.iter().filter(|i| i["deletedDate"].is_null()).collect()
+    items
+        .iter()
+        .filter(|i| i["deletedDate"].is_null())
+        .collect()
 }
 
 fn living_by_dedup_group(items: &[Value]) -> &Value {
@@ -160,8 +163,15 @@ fn merges_password_history_across_duplicates() {
     ];
     dedup_items(&mut items);
     let survivor = living_by_dedup_group(&items);
-    let hist = survivor.get("passwordHistory").and_then(Value::as_array).unwrap();
-    assert_eq!(hist.len(), 2, "both historical passwords should be preserved");
+    let hist = survivor
+        .get("passwordHistory")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(
+        hist.len(),
+        2,
+        "both historical passwords should be preserved"
+    );
     // Newest-first ordering.
     assert_eq!(
         hist[0].get("password").and_then(Value::as_str),
@@ -185,7 +195,10 @@ fn favorite_is_logical_or_across_group() {
     ];
     dedup_items(&mut items);
     let survivor = living_by_dedup_group(&items);
-    assert_eq!(survivor.get("favorite").and_then(Value::as_bool), Some(true));
+    assert_eq!(
+        survivor.get("favorite").and_then(Value::as_bool),
+        Some(true)
+    );
 }
 
 #[test]
@@ -238,9 +251,18 @@ fn preserves_every_distinct_note_in_merged_survivor() {
     dedup_items(&mut items);
     let survivor = living_by_dedup_group(&items);
     let notes = survivor.get("notes").and_then(Value::as_str).unwrap_or("");
-    assert!(notes.contains("first"), "distinct note 'first' must be merged");
-    assert!(notes.contains("second"), "distinct note 'second' must be merged");
-    assert!(notes.contains("third"), "distinct note 'third' must be merged");
+    assert!(
+        notes.contains("first"),
+        "distinct note 'first' must be merged"
+    );
+    assert!(
+        notes.contains("second"),
+        "distinct note 'second' must be merged"
+    );
+    assert!(
+        notes.contains("third"),
+        "distinct note 'third' must be merged"
+    );
 }
 
 #[test]
@@ -328,10 +350,7 @@ fn omits_folder_note_when_folders_match() {
     ];
     dedup_items(&mut items);
     let survivor = living_by_dedup_group(&items);
-    let notes = survivor
-        .get("notes")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let notes = survivor.get("notes").and_then(Value::as_str).unwrap_or("");
     assert!(
         !notes.contains("originally also in folder"),
         "no folder-note line when folders match; got {notes:?}"
@@ -436,4 +455,3 @@ fn dedup_loser_carries_deleted_date() {
         "deletedDate must be ISO 8601 UTC (got {loser_trash:?})"
     );
 }
-

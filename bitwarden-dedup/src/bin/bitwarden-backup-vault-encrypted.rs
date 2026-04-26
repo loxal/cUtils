@@ -108,21 +108,22 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Acquire OAuth bearer.
     eprintln!("Authenticating against {} ...", region.identity_base_url());
-    let mut token =
-        acquire_access_token(&client, region, &creds, &device_id, &device_name).await?;
+    let mut token = acquire_access_token(&client, region, &creds, &device_id, &device_name).await?;
     eprintln!("OK — bearer acquired (expires_in honored, full token redacted)");
 
     // 5. Fetch /api/sync (raw bytes — no parsing, no crypto). One
     //    refresh-and-retry on 401 so a token that the server has
     //    invalidated mid-session doesn't take down a multi-minute
     //    sync. Read-only operation, idempotent — safe to retry.
-    eprintln!("Fetching {}/sync?excludeDomains=true ...", region.api_base_url());
+    eprintln!(
+        "Fetching {}/sync?excludeDomains=true ...",
+        region.api_base_url()
+    );
     let sync_body = match fetch_sync(&client, region, &token).await {
         Ok(b) => b,
         Err(SyncError::Unauthorized { .. }) => {
             eprintln!("got 401 — bearer token invalidated server-side; refreshing once ...");
-            token =
-                acquire_access_token(&client, region, &creds, &device_id, &device_name).await?;
+            token = acquire_access_token(&client, region, &creds, &device_id, &device_name).await?;
             fetch_sync(&client, region, &token).await?
         }
         Err(other) => return Err(other.into()),
@@ -187,10 +188,8 @@ fn load_env_file(path: &std::path::Path) -> Result<LoadedEnv, Box<dyn std::error
             .map(|(_, v)| v.clone())
     };
 
-    let client_id =
-        get("BW_CLIENT_ID").ok_or("BW_CLIENT_ID missing from env file")?;
-    let client_secret =
-        get("BW_CLIENT_SECRET").ok_or("BW_CLIENT_SECRET missing from env file")?;
+    let client_id = get("BW_CLIENT_ID").ok_or("BW_CLIENT_ID missing from env file")?;
+    let client_secret = get("BW_CLIENT_SECRET").ok_or("BW_CLIENT_SECRET missing from env file")?;
     let region_raw = get("BW_REGION").ok_or(
         "BW_REGION missing from env file — set to `us` or `eu`. \
              No automatic region-discovery; the tool fails-fast.",
@@ -247,11 +246,7 @@ fn require_real_vault_dir(path: &std::path::Path) -> Result<(), Box<dyn std::err
         .into());
     }
     if !lmeta.file_type().is_dir() {
-        return Err(format!(
-            "{} exists but is not a directory",
-            path.display()
-        )
-        .into());
+        return Err(format!("{} exists but is not a directory", path.display()).into());
     }
     Ok(())
 }
@@ -259,14 +254,11 @@ fn require_real_vault_dir(path: &std::path::Path) -> Result<(), Box<dyn std::err
 /// On Unix: refuse if the file is group- or world-readable. The env
 /// file holds the personal API key — if anyone but the user can
 /// read it, the credential is already compromised.
-fn require_owner_only_perms(
-    path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn require_owner_only_perms(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path)
-            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             return Err(format!(

@@ -46,7 +46,7 @@ build:
 # Pass INPUT to override and point at a specific file. OUTPUT / AUDIT
 # let you override the default sibling paths (point at /tmp/ or vault/,
 # never at examples/).
-dedup input='' output='' audit='' split_divergent_totps='':
+dedup input='' output='' audit='' split_divergent_totps='' collapse_empty_passwords='':
     #!/usr/bin/env bash
     set -euo pipefail
     input="{{input}}"
@@ -78,13 +78,28 @@ dedup input='' output='' audit='' split_divergent_totps='':
     case "{{split_divergent_totps}}" in
         1|true|yes|on) split_flag="--split-divergent-totps" ;;
     esac
-    cargo run --locked --release --bin bitwarden-dedup -- --input "$input" $split_flag {{ if output != "" { "--output " + output } else { "" } }} {{ if audit != "" { "--audit " + audit } else { "" } }}
+    epw_flag=""
+    case "{{collapse_empty_passwords}}" in
+        1|true|yes|on) epw_flag="--collapse-empty-passwords" ;;
+    esac
+    cargo run --locked --release --bin bitwarden-dedup -- --input "$input" $split_flag $epw_flag {{ if output != "" { "--output " + output } else { "" } }} {{ if audit != "" { "--audit " + audit } else { "" } }}
 
 # Same as `just dedup` but with the safer --split-divergent-totps mode:
 # items that differ only in login.totp stay as separate living items
 # instead of auto-collapsing by revisionDate.
 dedup-split-totps input='' output='' audit='':
     @just dedup "{{input}}" "{{output}}" "{{audit}}" true
+
+# Same as `just dedup` but with --collapse-empty-passwords enabled.
+# Runs an additional opt-in dedup pass over credential-less stubs
+# (empty `login.password`) that the strict pass deliberately skips.
+# Items only group when name + organization + username + URI host set
+# + fido2 signature all match AND the group has at least one
+# identifying signal (non-empty username, non-empty URI host set, or
+# a fido2 credential). See README "Empty-password dedup pass" for the
+# full rationale and signal-kind risk classes.
+dedup-collapse-empty-passwords input='' output='' audit='':
+    @just dedup "{{input}}" "{{output}}" "{{audit}}" "" true
 
 # Merge an Apple Passwords CSV export into a Bitwarden JSON vault.
 # Without arguments: picks the newest `bitwarden_export_*.json` or
@@ -94,7 +109,7 @@ dedup-split-totps input='' output='' audit='':
 # Bitwarden input. Dedup losers land in a sidecar
 # `<bitwarden_stem>-with-icloud-credentials.trashed.json` — NOT
 # auto-imported; offline recovery copy.
-merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' split_divergent_totps='':
+merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' split_divergent_totps='' collapse_empty_passwords='':
     #!/usr/bin/env bash
     set -euo pipefail
     bw="{{bitwarden}}"
@@ -148,8 +163,12 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
     case "{{split_divergent_totps}}" in
         1|true|yes|on) split_flag="--split-divergent-totps" ;;
     esac
+    epw_flag=""
+    case "{{collapse_empty_passwords}}" in
+        1|true|yes|on) epw_flag="--collapse-empty-passwords" ;;
+    esac
     cargo run --locked --release --bin bitwarden-merge-icloud -- \
-        --bitwarden "$bw" --icloud "$csv" $split_flag \
+        --bitwarden "$bw" --icloud "$csv" $split_flag $epw_flag \
         {{ if output != "" { "--output " + output } else { "" } }} \
         {{ if audit != "" { "--audit " + audit } else { "" } }}
 
@@ -157,6 +176,12 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
 # --split-divergent-totps mode.
 merge-with-icloud-credentials-csv-split-totps bitwarden='' icloud='' output='' audit='':
     @just merge-with-icloud-credentials-csv "{{bitwarden}}" "{{icloud}}" "{{output}}" "{{audit}}" true
+
+# Same as merge-with-icloud-credentials-csv but with
+# --collapse-empty-passwords enabled. See `just
+# dedup-collapse-empty-passwords` for the rationale.
+merge-with-icloud-credentials-csv-collapse-empty-passwords bitwarden='' icloud='' output='' audit='':
+    @just merge-with-icloud-credentials-csv "{{bitwarden}}" "{{icloud}}" "{{output}}" "{{audit}}" "" true
 
 # Move every item in a Bitwarden export into a single folder. Replaces the
 # export's `folders` array with one folder of the given name and rewrites every

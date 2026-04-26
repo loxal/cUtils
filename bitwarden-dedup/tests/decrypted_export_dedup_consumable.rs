@@ -19,10 +19,10 @@
 
 use std::num::NonZeroU32;
 
+use bitwarden_dedup::live_vault::cipher_codec::decrypt_sync_to_export_shape;
 use bitwarden_dedup::live_vault::crypto::{
     KdfParams, SymmetricKey, derive_master_key, stretch_master_key,
 };
-use bitwarden_dedup::live_vault::cipher_codec::decrypt_sync_to_export_shape;
 use bitwarden_dedup::{DedupConfig, dedup_export_with_config};
 use secrecy::SecretString;
 
@@ -57,8 +57,7 @@ fn decrypted_output_runs_through_dedup_pipeline_without_error() {
     let login_uri = encrypt_for_test(&user_key, b"deterministic-iv-5", b"https://github.com");
 
     let note_name = encrypt_for_test(&user_key, b"deterministic-iv-6", b"Recovery codes");
-    let note_body =
-        encrypt_for_test(&user_key, b"deterministic-iv-7", b"abc-def-ghi-jkl-mno-pqr");
+    let note_body = encrypt_for_test(&user_key, b"deterministic-iv-7", b"abc-def-ghi-jkl-mno-pqr");
 
     let ssh_name = encrypt_for_test(&user_key, b"deterministic-iv-8", b"laptop-ed25519");
     let ssh_priv = encrypt_for_test(
@@ -205,7 +204,10 @@ fn decrypted_output_lets_dedup_pipeline_actually_dedup() {
         stats.groups, 1,
         "the two identical-credentials items must form one duplicate group"
     );
-    assert_eq!(stats.trashed, 1, "one of the pair gets trashed (deletedDate stamped)");
+    assert_eq!(
+        stats.trashed, 1,
+        "one of the pair gets trashed (deletedDate stamped)"
+    );
 }
 
 // -----------------------------------------------------------------

@@ -104,16 +104,21 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Resolve / persist deviceIdentifier.
     let device_id = persistent_device_identifier(vault_dir)?;
-    let device_name = format!("bitwarden-backup-vault-decrypted ({})", std::env::consts::OS);
+    let device_name = format!(
+        "bitwarden-backup-vault-decrypted ({})",
+        std::env::consts::OS
+    );
 
     // 5. OAuth bearer.
     eprintln!("Authenticating against {} ...", region.identity_base_url());
-    let mut token =
-        acquire_access_token(&client, region, &creds, &device_id, &device_name).await?;
+    let mut token = acquire_access_token(&client, region, &creds, &device_id, &device_name).await?;
     eprintln!("OK — bearer acquired (full token redacted)");
 
     // 6. /api/sync with one 401 refresh-and-retry.
-    eprintln!("Fetching {}/sync?excludeDomains=true ...", region.api_base_url());
+    eprintln!(
+        "Fetching {}/sync?excludeDomains=true ...",
+        region.api_base_url()
+    );
     let sync_body = match fetch_sync(&client, region, &token).await {
         Ok(b) => b,
         Err(SyncError::Unauthorized { .. }) => {
@@ -210,10 +215,8 @@ fn load_env_file(path: &std::path::Path) -> Result<LoadedEnv, Box<dyn std::error
             .map(|(_, v)| v.clone())
     };
 
-    let client_id =
-        get("BW_CLIENT_ID").ok_or("BW_CLIENT_ID missing from env file")?;
-    let client_secret =
-        get("BW_CLIENT_SECRET").ok_or("BW_CLIENT_SECRET missing from env file")?;
+    let client_id = get("BW_CLIENT_ID").ok_or("BW_CLIENT_ID missing from env file")?;
+    let client_secret = get("BW_CLIENT_SECRET").ok_or("BW_CLIENT_SECRET missing from env file")?;
     let region_raw = get("BW_REGION").ok_or(
         "BW_REGION missing from env file — set to `us` or `eu`. \
              No automatic region-discovery; the tool fails-fast.",
@@ -267,14 +270,11 @@ fn require_real_vault_dir(path: &std::path::Path) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-fn require_owner_only_perms(
-    path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn require_owner_only_perms(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path)
-            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
             return Err(format!(

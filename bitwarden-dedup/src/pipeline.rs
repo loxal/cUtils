@@ -21,14 +21,16 @@
 //! items with richer history aren't discarded in favour of a freshly-updated
 //! stub.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::json_util::get_str;
 use crate::key::{
-    dedup_key, is_dedupable_secure_note, is_dedupable_ssh_key, secure_note_key, skip_from_dedup,
-    ssh_key_key,
+    dedup_key, empty_password_dedup_key, is_dedupable_empty_password_login,
+    is_dedupable_secure_note, is_dedupable_ssh_key, secure_note_key, skip_from_dedup, ssh_key_key,
+    uri_host_set,
 };
 use crate::merge::{
     SecureNotePatch, SshKeyPatch, SurvivorPatch, apply_secure_note_patch, apply_ssh_key_patch,
@@ -54,6 +56,67 @@ pub struct DedupConfig {
     /// to `true` if you would rather keep the duplicates than risk
     /// having the wrong live secret on the living survivor.
     pub split_divergent_totps: bool,
+
+    /// When `true`, run a second login-dedup pass over credential-less
+    /// stubs (empty `login.password`) that the strict pass deliberately
+    /// skips. Items only group when name + organization + username +
+    /// URI host set + fido2 signature all match AND the group has at
+    /// least one identifying signal beyond its name (non-empty
+    /// username, non-empty URI host set, or a fido2 credential).
+    ///
+    /// Off by default because empty-password stubs can occasionally
+    /// represent distinct real-world accounts the user has not yet
+    /// filled in. Losers route to the trash sidecar like every other
+    /// dedup loser, so any false positive is recoverable.
+    pub collapse_empty_passwords: bool,
+}
+
+/// Which signal qualified an empty-password item for grouping in
+/// [`DedupConfig::collapse_empty_passwords`]. Listed in least-to-most
+/// corroborated order so a reviewer sorting by `signal_kind` sees the
+/// riskier groups first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalKind {
+    /// Group has matching username and nothing else (no URI hosts, no
+    /// fido2). Weakest signal class — the one most likely to produce a
+    /// false positive on an unusual vault.
+    UsernameOnly,
+    /// Group has matching URI host set (with or without username).
+    /// Stronger than `UsernameOnly` — host text is concrete identity.
+    Host,
+    /// Group has matching fido2 credential set (with or without
+    /// username/host). Strongest signal — identical credential
+    /// material.
+    Fido2,
+}
+
+impl SignalKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            SignalKind::UsernameOnly => "username_only",
+            SignalKind::Host => "host",
+            SignalKind::Fido2 => "fido2",
+        }
+    }
+
+    /// Pick the signal kind for a group based on the survivor's
+    /// fields. Priority: `Fido2 > Host > UsernameOnly`.
+    fn classify(item: &Value) -> Self {
+        let has_fido = item
+            .get("login")
+            .and_then(|l| l.get("fido2Credentials"))
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if has_fido {
+            return SignalKind::Fido2;
+        }
+        if !uri_host_set(item).is_empty() {
+            return SignalKind::Host;
+        }
+        SignalKind::UsernameOnly
+    }
 }
 
 /// Summary of a [`dedup_items`] run.
@@ -83,7 +146,21 @@ pub struct DedupConfig {
 pub struct DedupStats {
     pub total: usize,
     pub skipped: usize,
+    /// Total dedup groups across all passes. Kept as the back-compat
+    /// sum of the four per-pass counters below.
     pub groups: usize,
+    /// Strict login pass (non-empty password, [`crate::key::dedup_key`]).
+    pub strict_login_groups: usize,
+    /// Empty-password login pass — non-zero only when
+    /// [`DedupConfig::collapse_empty_passwords`] is set.
+    pub empty_password_groups: usize,
+    /// Items routed to trash by the empty-password pass specifically.
+    pub empty_password_trashed: usize,
+    /// Per-signal-kind breakdown of `empty_password_groups`. Sums to
+    /// `empty_password_groups`. Empty when the pass did not run.
+    pub empty_password_groups_by_signal: BTreeMap<SignalKind, usize>,
+    pub secure_note_groups: usize,
+    pub ssh_key_groups: usize,
     pub trashed: usize,
     pub merged: usize,
     pub totp_conflict_groups: usize,
@@ -109,7 +186,6 @@ impl DedupStats {
         self.trashed
     }
 }
-
 
 /// Run the full dedup pipeline on a `Vec<Value>` of Bitwarden items in place.
 ///
@@ -261,10 +337,7 @@ fn dedup_folders_in_export(export: &mut Value) -> Result<usize, String> {
                 continue;
             };
             if let Some(survivor) = id_remap.get(folder_id_str) {
-                item_obj.insert(
-                    "folderId".to_string(),
-                    Value::String(survivor.clone()),
-                );
+                item_obj.insert("folderId".to_string(), Value::String(survivor.clone()));
             }
         }
     }
@@ -325,10 +398,7 @@ pub(crate) fn dedup_items_with_folders(
         groups.entry(key).or_default().push(idx);
     }
 
-    let mut dupe_groups: Vec<Vec<usize>> = groups
-        .into_values()
-        .filter(|v| v.len() > 1)
-        .collect();
+    let mut dupe_groups: Vec<Vec<usize>> = groups.into_values().filter(|v| v.len() > 1).collect();
     dupe_groups.sort_by_key(|g| *g.first().unwrap_or(&0));
 
     // Pass 2: plan removals and build the merged-survivor value for each group.
@@ -433,35 +503,51 @@ pub(crate) fn dedup_items_with_folders(
         }
     }
 
+    // Pass 4.5: empty-password login dedup (opt-in). Runs AFTER the
+    // strict pass has already marked its losers with `deletedDate`,
+    // and `is_dedupable_empty_password_login` filters those out — so
+    // a strict-pass loser is never re-considered, and this pass only
+    // touches items the strict pass left alone (skipped because of
+    // empty pw).
+    let epw_outcome = if config.collapse_empty_passwords {
+        dedup_empty_password_logins(items, folders, &now, config)
+    } else {
+        EmptyPasswordOutcome::default()
+    };
+
     // Pass 5: secure-note dedup.
-    let (note_groups, note_trashed, note_audit_entries) =
-        dedup_secure_notes(items, folders, &now);
+    let (note_groups, note_trashed, note_audit_entries) = dedup_secure_notes(items, folders, &now);
 
     // Pass 6: SSH key dedup.
-    let (ssh_groups, ssh_trashed, ssh_audit_entries) =
-        dedup_ssh_keys(items, folders, &now);
+    let (ssh_groups, ssh_trashed, ssh_audit_entries) = dedup_ssh_keys(items, folders, &now);
 
     // Combined counts cover every pass.
-    let trashed = to_drop.len() + note_trashed + ssh_trashed;
-    let groups_total = dupe_groups.len() + note_groups + ssh_groups;
+    let strict_login_groups = dupe_groups.len();
+    let trashed = to_drop.len() + epw_outcome.trashed + note_trashed + ssh_trashed;
+    let groups_total = strict_login_groups + epw_outcome.groups + note_groups + ssh_groups;
     let mut combined_audit = audit_entries;
+    combined_audit.extend(epw_outcome.audit_entries);
     combined_audit.extend(note_audit_entries);
     combined_audit.extend(ssh_audit_entries);
+    total_merged += epw_outcome.uris_merged;
+    totp_conflict_groups += epw_outcome.totp_conflict_groups;
 
     let output = items.len();
     let living = items
         .iter()
-        .filter(|v| {
-            v.get("deletedDate")
-                .map(Value::is_null)
-                .unwrap_or(true)
-        })
+        .filter(|v| v.get("deletedDate").map(Value::is_null).unwrap_or(true))
         .count();
 
     DedupStats {
         total,
         skipped,
         groups: groups_total,
+        strict_login_groups,
+        empty_password_groups: epw_outcome.groups,
+        empty_password_trashed: epw_outcome.trashed,
+        empty_password_groups_by_signal: epw_outcome.groups_by_signal,
+        secure_note_groups: note_groups,
+        ssh_key_groups: ssh_groups,
         trashed,
         merged: total_merged,
         totp_conflict_groups,
@@ -472,6 +558,165 @@ pub(crate) fn dedup_items_with_folders(
         output,
         living,
         audit_entries: combined_audit,
+    }
+}
+
+/// Outcome of the empty-password login dedup pass. Aggregates the
+/// information the orchestrator needs to fold into [`DedupStats`].
+#[derive(Default)]
+struct EmptyPasswordOutcome {
+    groups: usize,
+    trashed: usize,
+    audit_entries: Vec<Value>,
+    uris_merged: usize,
+    totp_conflict_groups: usize,
+    groups_by_signal: BTreeMap<SignalKind, usize>,
+}
+
+/// Pass 4.5 — group credential-less stubs (empty `login.password`)
+/// that the strict pass deliberately skipped. Same merge semantics as
+/// the strict pass: longer `passwordHistory` → newer `revisionDate` →
+/// newer `creationDate` survivor selection, full URI/notes/fields
+/// union onto the survivor, losers tagged with `deletedDate = now`
+/// for routing into the trash sidecar.
+///
+/// Items that fail [`is_dedupable_empty_password_login`] (no signal
+/// beyond their name, or filtered for the usual safety reasons) pass
+/// through untouched. The strict pass's losers (which already carry
+/// `deletedDate`) are also filtered out, so we never re-process them.
+fn dedup_empty_password_logins(
+    items: &mut Vec<Value>,
+    folders: &HashMap<String, String>,
+    now: &str,
+    config: &DedupConfig,
+) -> EmptyPasswordOutcome {
+    use crate::merge::{SurvivorPatch, apply_survivor_patch, build_survivor_patch};
+
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        if !is_dedupable_empty_password_login(item) {
+            continue;
+        }
+        let base_key = empty_password_dedup_key(item);
+        let key = if config.split_divergent_totps {
+            let totp = item
+                .get("login")
+                .and_then(|l| l.get("totp"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            format!("{base_key}\0totp={totp}")
+        } else {
+            base_key
+        };
+        groups.entry(key).or_default().push(idx);
+    }
+
+    let mut dupe_groups: Vec<Vec<usize>> = groups.into_values().filter(|v| v.len() > 1).collect();
+    dupe_groups.sort_by_key(|g| *g.first().unwrap_or(&0));
+
+    let mut to_drop: HashSet<usize> = HashSet::new();
+    let mut audit_entries: Vec<Value> = Vec::new();
+    let mut survivor_patches: Vec<(usize, SurvivorPatch)> = Vec::new();
+    let mut total_uris_merged = 0usize;
+    let mut totp_conflict_groups = 0usize;
+    let mut groups_by_signal: BTreeMap<SignalKind, usize> = BTreeMap::new();
+
+    for group in &dupe_groups {
+        let mut ordered = group.clone();
+        ordered.sort_by(|a, b| {
+            let a_hist = password_history_len(&items[*a]);
+            let b_hist = password_history_len(&items[*b]);
+            let a_rev = get_str(&items[*a], "revisionDate");
+            let b_rev = get_str(&items[*b], "revisionDate");
+            let a_cre = get_str(&items[*a], "creationDate");
+            let b_cre = get_str(&items[*b], "creationDate");
+            (b_hist, b_rev, b_cre).cmp(&(a_hist, a_rev, a_cre))
+        });
+        let keep_idx = ordered[0];
+        let drop_idxs = &ordered[1..];
+
+        let keep = &items[keep_idx];
+        let drops: Vec<&Value> = drop_idxs.iter().map(|i| &items[*i]).collect();
+
+        let signal_kind = SignalKind::classify(keep);
+        *groups_by_signal.entry(signal_kind).or_insert(0) += 1;
+
+        let patch = build_survivor_patch(keep, &drops, folders);
+        let merged_here = patch.uri_additions.len();
+        total_uris_merged += merged_here;
+        if patch.totp.conflict {
+            totp_conflict_groups += 1;
+        }
+
+        let keep_id = keep.get("id").cloned().unwrap_or(Value::Null);
+        let keep_rev = keep.get("revisionDate").cloned().unwrap_or(Value::Null);
+        let keep_folder = keep.get("folderId").cloned().unwrap_or(Value::Null);
+        let keep_name_for_audit = Value::String(patch.longest_name.clone());
+        let totp_conflict = patch.totp.conflict;
+        let totp_kept_from_id = patch
+            .totp
+            .chosen_from_id
+            .as_ref()
+            .map(|s| Value::String(s.clone()))
+            .unwrap_or(Value::Null);
+        let fields_merged_count = patch.field_additions.len();
+        let collections_merged_count = patch.collection_additions.len();
+        let folder_note_added = patch.folder_note_line.is_some();
+        let notes_merged_flag = patch.notes_merged;
+
+        for &di in drop_idxs {
+            to_drop.insert(di);
+            let dropped = &items[di];
+            audit_entries.push(json!({
+                "item_kind": "empty_password_login",
+                "signal_kind": signal_kind.as_str(),
+                "removed_id": dropped.get("id").cloned().unwrap_or(Value::Null),
+                "removed_name": dropped.get("name").cloned().unwrap_or(Value::Null),
+                "removed_username": dropped
+                    .get("login").and_then(|l| l.get("username"))
+                    .cloned().unwrap_or(Value::Null),
+                "removed_revisionDate": dropped.get("revisionDate").cloned().unwrap_or(Value::Null),
+                "removed_creationDate": dropped.get("creationDate").cloned().unwrap_or(Value::Null),
+                "removed_folderId": dropped.get("folderId").cloned().unwrap_or(Value::Null),
+                "removed_totp_present": dropped
+                    .get("login").and_then(|l| l.get("totp"))
+                    .and_then(Value::as_str)
+                    .map(|s| !s.is_empty()).unwrap_or(false),
+                "kept_id": keep_id.clone(),
+                "kept_name": keep_name_for_audit.clone(),
+                "kept_revisionDate": keep_rev.clone(),
+                "kept_folderId": keep_folder.clone(),
+                "uris_merged_into_kept": merged_here,
+                "totp_conflict": totp_conflict,
+                "totp_kept_from_id": totp_kept_from_id.clone(),
+                "notes_merged": notes_merged_flag,
+                "fields_merged": fields_merged_count,
+                "collections_merged": collections_merged_count,
+                "folder_note_added": folder_note_added,
+            }));
+        }
+
+        survivor_patches.push((keep_idx, patch));
+    }
+
+    for (keep_idx, patch) in survivor_patches {
+        apply_survivor_patch(&mut items[keep_idx], patch);
+    }
+    for (i, item) in items.iter_mut().enumerate() {
+        if to_drop.contains(&i)
+            && let Some(obj) = item.as_object_mut()
+        {
+            obj.insert("deletedDate".to_string(), Value::String(now.to_string()));
+        }
+    }
+
+    EmptyPasswordOutcome {
+        groups: dupe_groups.len(),
+        trashed: to_drop.len(),
+        audit_entries,
+        uris_merged: total_uris_merged,
+        totp_conflict_groups,
+        groups_by_signal,
     }
 }
 
@@ -497,10 +742,7 @@ fn dedup_secure_notes(
         }
         groups.entry(secure_note_key(item)).or_default().push(idx);
     }
-    let mut dupe_groups: Vec<Vec<usize>> = groups
-        .into_values()
-        .filter(|v| v.len() > 1)
-        .collect();
+    let mut dupe_groups: Vec<Vec<usize>> = groups.into_values().filter(|v| v.len() > 1).collect();
     dupe_groups.sort_by_key(|g| *g.first().unwrap_or(&0));
 
     let mut to_drop: HashSet<usize> = HashSet::new();
@@ -606,8 +848,7 @@ fn dedup_ssh_keys(
         }
         groups.entry(ssh_key_key(item)).or_default().push(idx);
     }
-    let mut dupe_groups: Vec<Vec<usize>> =
-        groups.into_values().filter(|v| v.len() > 1).collect();
+    let mut dupe_groups: Vec<Vec<usize>> = groups.into_values().filter(|v| v.len() > 1).collect();
     dupe_groups.sort_by_key(|g| *g.first().unwrap_or(&0));
 
     let mut to_drop: HashSet<usize> = HashSet::new();
@@ -694,14 +935,20 @@ mod tests {
         // mistakes upstream of a purge-and-reimport.
         let mut no_items = json!({"folders": []});
         let err = dedup_export(&mut no_items).unwrap_err();
-        assert!(err.contains("missing"), "error must mention missing items: {err:?}");
+        assert!(
+            err.contains("missing"),
+            "error must mention missing items: {err:?}"
+        );
     }
 
     #[test]
     fn dedup_export_errors_on_non_array_items() {
         let mut bad = json!({"folders": [], "items": "oops"});
         let err = dedup_export(&mut bad).unwrap_err();
-        assert!(err.contains("not an array"), "error must explain the shape issue: {err:?}");
+        assert!(
+            err.contains("not an array"),
+            "error must explain the shape issue: {err:?}"
+        );
     }
 
     #[test]
@@ -756,14 +1003,20 @@ mod tests {
         dedup_items(&mut items);
         // Both items still in array; loser is trashed, survivor is living.
         assert_eq!(items.len(), 2);
-        let living: Vec<&Value> = items.iter().filter(|i| i["deletedDate"].is_null()).collect();
+        let living: Vec<&Value> = items
+            .iter()
+            .filter(|i| i["deletedDate"].is_null())
+            .collect();
         assert_eq!(living.len(), 1);
         assert_eq!(
             living[0].get("id").and_then(Value::as_str),
             Some("aaaaaaaa"),
             "item with longer passwordHistory must be the living survivor"
         );
-        let trashed: Vec<&Value> = items.iter().filter(|i| !i["deletedDate"].is_null()).collect();
+        let trashed: Vec<&Value> = items
+            .iter()
+            .filter(|i| !i["deletedDate"].is_null())
+            .collect();
         assert_eq!(trashed.len(), 1);
         assert_eq!(
             trashed[0].get("id").and_then(Value::as_str),
@@ -822,6 +1075,7 @@ mod tests {
             &mut items,
             &DedupConfig {
                 split_divergent_totps: true,
+                ..Default::default()
             },
         );
         assert_eq!(stats.trashed, 0, "divergent TOTPs must not collapse");
@@ -896,6 +1150,355 @@ mod tests {
         assert_eq!(entry["collections_merged"], 1);
         assert_eq!(entry["folder_note_added"], false);
         assert_eq!(entry["totp_conflict"], false);
+    }
+
+    // ---------- empty-password dedup pass ----------
+
+    fn epw_login(name: &str, user: &str, uri: Option<&str>) -> Value {
+        let uris = match uri {
+            Some(u) => json!([{"uri": u, "match": null}]),
+            None => json!([]),
+        };
+        json!({
+            "id": format!("id-{}-{}-{:?}", name, user, uri),
+            "type": 1,
+            "name": name,
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "creationDate": "2026-01-01T00:00:00Z",
+            "login": {
+                "username": user,
+                "password": "",
+                "uris": uris,
+            },
+        })
+    }
+
+    #[test]
+    fn epw_off_by_default_three_identical_stay_living() {
+        let mut items = vec![
+            epw_login("Acme", "u", Some("https://acme.com/")),
+            epw_login("Acme", "u", Some("https://acme.com/")),
+            epw_login("Acme", "u", Some("https://acme.com/")),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.empty_password_groups, 0);
+        assert_eq!(stats.empty_password_trashed, 0);
+        assert_eq!(stats.living, 3);
+        assert_eq!(stats.trashed, 0);
+    }
+
+    #[test]
+    fn epw_three_identical_collapse_when_flag_on() {
+        let mut items = vec![
+            epw_login("Acme", "u", Some("https://acme.com/")),
+            epw_login("Acme", "u", Some("https://acme.com/")),
+            epw_login("Acme", "u", Some("https://acme.com/")),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.empty_password_groups, 1);
+        assert_eq!(stats.empty_password_trashed, 2);
+        assert_eq!(stats.living, 1);
+        assert_eq!(stats.output, 3);
+    }
+
+    #[test]
+    fn epw_username_only_signal_collapses_and_classifies() {
+        let mut items = vec![
+            epw_login("oura", "alex@example.test", None),
+            epw_login("oura", "alex@example.test", None),
+            epw_login("oura", "alex@example.test", None),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.empty_password_groups, 1);
+        assert_eq!(stats.empty_password_trashed, 2);
+        assert_eq!(
+            stats
+                .empty_password_groups_by_signal
+                .get(&SignalKind::UsernameOnly),
+            Some(&1)
+        );
+        assert_eq!(stats.audit_entries.len(), 2);
+        assert_eq!(stats.audit_entries[0]["item_kind"], "empty_password_login");
+        assert_eq!(stats.audit_entries[0]["signal_kind"], "username_only");
+    }
+
+    #[test]
+    fn epw_host_only_signal_collapses_and_classifies() {
+        let mut items = vec![
+            epw_login("Heat", "", Some("https://heatledger.com/")),
+            epw_login("Heat", "", Some("https://heatledger.com/")),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.empty_password_groups, 1);
+        assert_eq!(
+            stats.empty_password_groups_by_signal.get(&SignalKind::Host),
+            Some(&1)
+        );
+        assert_eq!(stats.audit_entries[0]["signal_kind"], "host");
+    }
+
+    #[test]
+    fn epw_fido2_signal_classification_beats_host_and_user() {
+        let mut a = epw_login("Acme", "u", Some("https://acme.com/"));
+        let mut b = epw_login("Acme", "u", Some("https://acme.com/"));
+        a["id"] = json!("a");
+        b["id"] = json!("b");
+        a["login"]["fido2Credentials"] = json!([{"credentialId": "pk-1"}]);
+        b["login"]["fido2Credentials"] = json!([{"credentialId": "pk-1"}]);
+        let mut items = vec![a, b];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.empty_password_groups, 1);
+        assert_eq!(
+            stats
+                .empty_password_groups_by_signal
+                .get(&SignalKind::Fido2),
+            Some(&1)
+        );
+        assert_eq!(stats.audit_entries[0]["signal_kind"], "fido2");
+    }
+
+    #[test]
+    fn epw_no_signal_items_pass_through() {
+        let mut items = vec![
+            epw_login("Acme", "", None),
+            epw_login("Acme", "", None),
+            epw_login("Acme", "", None),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.empty_password_groups, 0);
+        assert_eq!(stats.empty_password_trashed, 0);
+        assert_eq!(stats.living, 3);
+    }
+
+    #[test]
+    fn epw_diverging_fido2_keeps_items_split() {
+        let mut a = epw_login("Pass", "u", Some("https://example.com/"));
+        let mut b = epw_login("Pass", "u", Some("https://example.com/"));
+        a["id"] = json!("a");
+        b["id"] = json!("b");
+        a["login"]["fido2Credentials"] = json!([{"credentialId": "pk-alice"}]);
+        b["login"]["fido2Credentials"] = json!([{"credentialId": "pk-bob"}]);
+        let mut items = vec![a, b];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            stats.empty_password_groups, 0,
+            "divergent fido2 must keep items split"
+        );
+        assert_eq!(stats.living, 2);
+    }
+
+    #[test]
+    fn epw_dns_vs_opaque_uri_stay_split() {
+        let mut items = vec![
+            epw_login("X", "", Some("https://example.com/")),
+            epw_login("X", "", Some("example.com")),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.empty_password_groups, 0);
+        assert_eq!(stats.living, 2);
+    }
+
+    #[test]
+    fn epw_port_bearing_separation() {
+        let mut items = vec![
+            epw_login("Internal", "", Some("https://internal.example.com:8443/")),
+            epw_login("Internal", "", Some("https://internal.example.com:9090/")),
+            epw_login("Internal", "", Some("https://internal.example.com/")),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            stats.empty_password_groups, 0,
+            "items differing only in port must stay split"
+        );
+        assert_eq!(stats.living, 3);
+    }
+
+    #[test]
+    fn epw_custom_scheme_byte_exact() {
+        let mut items = vec![
+            epw_login("MyApp", "u", Some("myapp://Login?token=abc")),
+            epw_login("MyApp", "u", Some("myapp://login?token=def")),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.empty_password_groups, 0);
+        assert_eq!(stats.living, 2);
+    }
+
+    #[test]
+    fn epw_does_not_cross_merge_with_strict_pass() {
+        let mut items = vec![
+            json!({
+                "id": "non-empty",
+                "type": 1, "name": "Acme",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "login": {"username": "u", "password": "actual-pw",
+                    "uris": [{"uri": "https://acme.com/"}]}
+            }),
+            epw_login("Acme", "u", Some("https://acme.com/")),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.strict_login_groups, 0);
+        assert_eq!(stats.empty_password_groups, 0);
+        assert_eq!(stats.living, 2);
+    }
+
+    #[test]
+    fn epw_combined_with_split_divergent_totps() {
+        let mut items = vec![
+            json!({
+                "id": "with-old", "type": 1, "name": "Acme",
+                "revisionDate": "2026-02-01T00:00:00Z",
+                "login": {"username": "u", "password": "",
+                    "uris": [{"uri": "https://acme.com/"}],
+                    "totp": "otpauth://totp/A?secret=OLD"}
+            }),
+            json!({
+                "id": "with-new", "type": 1, "name": "Acme",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "login": {"username": "u", "password": "",
+                    "uris": [{"uri": "https://acme.com/"}],
+                    "totp": "otpauth://totp/A?secret=NEW"}
+            }),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                split_divergent_totps: true,
+            },
+        );
+        assert_eq!(stats.empty_password_groups, 0);
+        assert_eq!(stats.living, 2);
+    }
+
+    #[test]
+    fn epw_pre_existing_trashed_passes_through() {
+        let mut items = vec![
+            json!({
+                "id": "already-trash", "type": 1, "name": "Old",
+                "deletedDate": "2025-01-01T00:00:00Z",
+                "revisionDate": "2024-12-01T00:00:00Z",
+                "login": {"username": "u", "password": "",
+                    "uris": [{"uri": "https://example.com/"}]}
+            }),
+            epw_login("Old", "u", Some("https://example.com/")),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            stats.empty_password_groups, 0,
+            "the already-trashed item must not group with the living one"
+        );
+        let trashed = items
+            .iter()
+            .find(|i| i["id"].as_str() == Some("already-trash"))
+            .unwrap();
+        assert_eq!(
+            trashed["deletedDate"].as_str(),
+            Some("2025-01-01T00:00:00Z"),
+            "pre-existing deletedDate must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn epw_groups_sum_equals_total_groups() {
+        let mut items = vec![
+            json!({
+                "id": "s1", "type": 1, "name": "A",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "login": {"username": "u", "password": "p"}
+            }),
+            json!({
+                "id": "s2", "type": 1, "name": "A",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "login": {"username": "u", "password": "p"}
+            }),
+            epw_login("B", "v", Some("https://b.com/")),
+            epw_login("B", "v", Some("https://b.com/")),
+        ];
+        let stats = dedup_items_with_config(
+            &mut items,
+            &DedupConfig {
+                collapse_empty_passwords: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(stats.strict_login_groups, 1);
+        assert_eq!(stats.empty_password_groups, 1);
+        assert_eq!(stats.secure_note_groups, 0);
+        assert_eq!(stats.ssh_key_groups, 0);
+        assert_eq!(
+            stats.groups,
+            stats.strict_login_groups
+                + stats.empty_password_groups
+                + stats.secure_note_groups
+                + stats.ssh_key_groups
+        );
     }
 
     #[test]

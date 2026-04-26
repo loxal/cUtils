@@ -35,8 +35,8 @@ use serde_json::Value;
 use serde_json::json;
 
 use super::crypto::{
-    CryptoError, EncString, KdfParams, SymmetricKey, decrypt, decrypt_to_string,
-    derive_master_key, stretch_master_key,
+    CryptoError, EncString, KdfParams, SymmetricKey, decrypt, decrypt_to_string, derive_master_key,
+    stretch_master_key,
 };
 use secrecy::SecretString;
 
@@ -55,7 +55,10 @@ pub enum CodecError {
     /// Encryption-v2 (type 7) marker found. The user's account has
     /// migrated to XChaCha20-Poly1305; this tool doesn't yet support
     /// that envelope. Refuses cleanly per audit invariant L.0 #5.
-    EncryptionV2 { cipher_id: String, field: &'static str },
+    EncryptionV2 {
+        cipher_id: String,
+        field: &'static str,
+    },
     /// Master key derivation or user-key unwrap failed (typically
     /// "wrong master password" — HMAC mismatch on profile.key).
     MasterUnwrap(CryptoError),
@@ -540,13 +543,11 @@ fn decrypt_cipher(cipher: Cipher, user_key: &SymmetricKey) -> Result<Value, Code
     Ok(Value::Object(item))
 }
 
-fn decrypt_login(
-    cipher_id: &str,
-    login: Login,
-    key: &SymmetricKey,
-) -> Result<Value, CodecError> {
-    let username = optional_field_string(cipher_id, "login.username", login.username.as_deref(), key)?;
-    let password = optional_field_string(cipher_id, "login.password", login.password.as_deref(), key)?;
+fn decrypt_login(cipher_id: &str, login: Login, key: &SymmetricKey) -> Result<Value, CodecError> {
+    let username =
+        optional_field_string(cipher_id, "login.username", login.username.as_deref(), key)?;
+    let password =
+        optional_field_string(cipher_id, "login.password", login.password.as_deref(), key)?;
     let totp = optional_field_string(cipher_id, "login.totp", login.totp.as_deref(), key)?;
 
     let uris = match login.uris {
@@ -611,11 +612,7 @@ fn decrypt_fido2(
     }))
 }
 
-fn decrypt_card(
-    cipher_id: &str,
-    card: Card,
-    key: &SymmetricKey,
-) -> Result<Value, CodecError> {
+fn decrypt_card(cipher_id: &str, card: Card, key: &SymmetricKey) -> Result<Value, CodecError> {
     Ok(json!({
         "cardholderName": optional_field_string(cipher_id, "card.cardholderName", card.cardholder_name.as_deref(), key)?,
         "brand": optional_field_string(cipher_id, "card.brand", card.brand.as_deref(), key)?,
@@ -653,11 +650,7 @@ fn decrypt_identity(
     }))
 }
 
-fn decrypt_ssh_key(
-    cipher_id: &str,
-    s: SshKey,
-    key: &SymmetricKey,
-) -> Result<Value, CodecError> {
+fn decrypt_ssh_key(cipher_id: &str, s: SshKey, key: &SymmetricKey) -> Result<Value, CodecError> {
     Ok(json!({
         "privateKey": optional_field_string(cipher_id, "sshKey.privateKey", s.private_key.as_deref(), key)?,
         "publicKey": optional_field_string(cipher_id, "sshKey.publicKey", s.public_key.as_deref(), key)?,
@@ -678,10 +671,12 @@ fn optional_field_string(
     match enc_str {
         None => Ok(Value::Null),
         Some("") => Ok(Value::String(String::new())),
-        Some(s) => Ok(Value::String(decrypt_field(s, key, cipher_id, field_name)?
-            .as_str()
-            .unwrap_or("")
-            .to_string())),
+        Some(s) => Ok(Value::String(
+            decrypt_field(s, key, cipher_id, field_name)?
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+        )),
     }
 }
 
@@ -745,10 +740,10 @@ mod tests {
             b"hardcoded-test-iv",
             &mut [
                 0xa5u8, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
-                0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
-                0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
-                0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
-                0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+                0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+                0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+                0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
+                0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
             ],
         );
 

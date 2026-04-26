@@ -187,8 +187,8 @@ fn is_primary_vault_export(path: &Path) -> bool {
     if !name.ends_with(".json") {
         return false;
     }
-    let has_known_prefix = name.starts_with("bitwarden_export_")
-        || name.starts_with("bitwarden_decrypted-export_");
+    let has_known_prefix =
+        name.starts_with("bitwarden_export_") || name.starts_with("bitwarden_decrypted-export_");
     if !has_known_prefix {
         return false;
     }

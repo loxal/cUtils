@@ -148,7 +148,12 @@ Items that are **never** grouped (passed through byte-identical):
   pipeline entirely.
 - items with `reprompt == 1` (master-password gated — too sensitive to
   auto-merge)
-- items with an empty password (would spuriously group on `""`)
+- items with an empty password (would spuriously group on `""`) —
+  unless `--collapse-empty-passwords` is set, in which case
+  empty-password stubs run through a [second dedup pass](#empty-password-dedup-pass-opt-in)
+  that requires at least one of `{username, URI hostname, fido2}` to
+  match. Items with no identifying signal beyond their name are still
+  passed through untouched.
 - items whose name already contains `[duplicate]`
 - already-trashed items (their `deletedDate` is preserved as-is)
 
@@ -259,6 +264,80 @@ mode without dropping to raw `cargo run`:
 just dedup-split-totps                             # plain dedup
 just merge-with-icloud-credentials-csv-split-totps # iCloud merge
 ```
+
+### Empty-password dedup pass (opt-in)
+
+Pass `--collapse-empty-passwords` (or run
+`just dedup-collapse-empty-passwords`) to enable a second dedup pass
+that targets the credential-less stubs the strict pass deliberately
+skips. These items typically come from browser auto-save loops where
+the same domain gets saved repeatedly without a password, leaving 10–30
+identical entries.
+
+The pass requires **all** of the following to match before collapsing:
+
+| Field | Match rule |
+|---|---|
+| `name` | same `normalize_name` rule as the strict pass (case-fold, email-suffix strip) |
+| `organizationId` | exact — personal and org items never cross-dedup |
+| `login.username` | trim-only, case preserved |
+| URI host set | sorted set of `(HostKind, host_token)` pairs from `login.uris`. Hosts pulled via `host_of` (see below). |
+| `login.fido2Credentials` | canonical full credential equality, same as the strict pass |
+
+It also requires **at least one** of `{username, URI host set, fido2}`
+to be non-empty. An item with empty password + empty username +
+empty URI list + no fido2 has nothing to group on beyond the
+display name; the pass refuses to collapse such items.
+
+**URI hostname extraction (`host_of`)** mirrors the no-case-folding
+policy already used by `src/uris.rs`:
+
+- `http`, `https`, `ws`, `wss` URLs → host pulled by `url::Url`,
+  lowercased (DNS is case-insensitive). **Non-default ports preserved**
+  in the host token (`example.com:8443` stays distinct from
+  `example.com`).
+- `androidapp://com.example.app/...` → package name preserved
+  verbatim (Android packages are case-sensitive). Path / query /
+  fragment stripped.
+- Anything else (custom schemes like `myapp://`, bare reverse-DNS
+  App IDs, unparseable strings) → the entire URI is preserved
+  case-exact and tagged as opaque. Critically, this means
+  `myapp://Login?token=abc` and `myapp://login?token=def` stay split
+  — we do not case-fold identifiers from unknown-scheme URIs.
+
+**Survivor selection and merge rules** are identical to the strict
+pass: longer `passwordHistory` → newer `revisionDate` → newer
+`creationDate`; URIs/notes/fields/passwordHistory/collections all
+union onto the survivor; folder disambiguation note added when a
+drop sat in a different folder; favorite is OR'd; longest raw name
+wins. Trash routing is identical too — losers carry `deletedDate =
+now` and split into the trash sidecar.
+
+**Audit entries** for this pass carry `"item_kind":
+"empty_password_login"` plus a `"signal_kind"` field (`"fido2"`,
+`"host"`, or `"username_only"`) so reviewers can grep the riskier
+classes:
+
+```bash
+# Spot-check the weakest evidence class — username-only groups.
+jq '.entries[] | select(.signal_kind == "username_only")' \
+   vault/bitwarden_export_<ts>.dedup.audit.json
+```
+
+`username_only` is the weakest signal class because two distinct
+accounts at different sites that happen to share an email-as-username
+display name could in principle collapse. The trash sidecar preserves
+every loser fully, so any false positive is recoverable. The audit
+JSON additionally surfaces a `"empty_password_groups_by_signal":
+{"fido2": F, "host": H, "username_only": U}` summary at the top level.
+
+> Tradeoff: the pass deliberately under-skipped items that look like
+> the same account but happen to be unfilled (e.g. you started typing
+> the password but didn't save). With the flag set, those collapse
+> together; the loser's URIs, notes, custom fields, and password
+> history all union onto the survivor, so nothing the user typed is
+> lost. If you would rather hand-reconcile such groups, leave the
+> flag off — current behavior is unchanged.
 
 ### A note on the note-body heuristic
 

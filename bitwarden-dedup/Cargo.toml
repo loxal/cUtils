@@ -10,6 +10,12 @@ publish = false
 clap = { version = "4.5.53", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.149"
+# Already in the transitive tree via reqwest; promoted to a direct
+# dep so the empty-password dedup pass's URI host parsing has a
+# stable, named handle on the parser. host_of() in src/key.rs only
+# uses url::Url for an allowlisted set of schemes (http/https/ws/wss)
+# — everything else falls through to a case-preserving Opaque token.
+url = "2.5"
 
 # Phase 1a (api-dedup) — REST transport. Existing binaries remain
 # sync-only; only the api-dedup binary's main is async.

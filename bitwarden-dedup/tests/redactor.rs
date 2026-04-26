@@ -161,7 +161,11 @@ fn synthetic_source() -> Value {
 
 fn write_source(dir: &Path) -> PathBuf {
     let input = dir.join("source.json");
-    std::fs::write(&input, serde_json::to_string_pretty(&synthetic_source()).unwrap()).unwrap();
+    std::fs::write(
+        &input,
+        serde_json::to_string_pretty(&synthetic_source()).unwrap(),
+    )
+    .unwrap();
     input
 }
 
@@ -227,8 +231,14 @@ fn redactor_strips_all_source_metadata() {
     assert_eq!(items.len(), 3, "all source items should still be present");
 
     for item in items {
-        assert!(item["organizationId"].is_null(), "organizationId must be null");
-        assert!(item["collectionIds"].is_null(), "collectionIds must be null");
+        assert!(
+            item["organizationId"].is_null(),
+            "organizationId must be null"
+        );
+        assert!(
+            item["collectionIds"].is_null(),
+            "collectionIds must be null"
+        );
         assert!(item["notes"].is_null(), "notes must be null");
         assert!(
             item["passwordHistory"].is_null(),
@@ -287,12 +297,8 @@ fn redactor_preserves_dedup_equivalence() {
     let output = dir.join("redacted.json");
     run_redactor(&input, &output);
 
-    let mut data: Value =
-        serde_json::from_str(&std::fs::read_to_string(&output).unwrap()).unwrap();
-    let items_owned: Vec<Value> = match data
-        .as_object_mut()
-        .and_then(|o| o.get_mut("items"))
-    {
+    let mut data: Value = serde_json::from_str(&std::fs::read_to_string(&output).unwrap()).unwrap();
+    let items_owned: Vec<Value> = match data.as_object_mut().and_then(|o| o.get_mut("items")) {
         Some(Value::Array(arr)) => std::mem::take(arr),
         _ => panic!("redacted output missing items"),
     };
@@ -536,8 +542,7 @@ fn is_synthetic_uuid_item_or_folder(s: &str) -> bool {
     if s.len() != 36 {
         return false;
     }
-    if !s.starts_with("00000000-0000-0000-0000-") && !s.starts_with("00000000-0000-0000-0001-")
-    {
+    if !s.starts_with("00000000-0000-0000-0000-") && !s.starts_with("00000000-0000-0000-0001-") {
         return false;
     }
     if s.chars().filter(|&c| c == '-').count() != 4 {
@@ -590,11 +595,21 @@ mod shape_unit_tests {
         assert!(is_redactor_output_shape_safe("user0042@example.test"));
         assert!(is_redactor_output_shape_safe("redacted-password-0042"));
         assert!(is_redactor_output_shape_safe("redacted-totp-seed-0042"));
-        assert!(is_redactor_output_shape_safe("https://service0042.example.test"));
-        assert!(is_redactor_output_shape_safe("https://service0042.example.test/0"));
-        assert!(is_redactor_output_shape_safe("http://service0042.example.test/3"));
-        assert!(is_redactor_output_shape_safe("androidapp://com.example.service0042"));
-        assert!(is_redactor_output_shape_safe("com.example.opaque.service0042.0"));
+        assert!(is_redactor_output_shape_safe(
+            "https://service0042.example.test"
+        ));
+        assert!(is_redactor_output_shape_safe(
+            "https://service0042.example.test/0"
+        ));
+        assert!(is_redactor_output_shape_safe(
+            "http://service0042.example.test/3"
+        ));
+        assert!(is_redactor_output_shape_safe(
+            "androidapp://com.example.service0042"
+        ));
+        assert!(is_redactor_output_shape_safe(
+            "com.example.opaque.service0042.0"
+        ));
         assert!(is_redactor_output_shape_safe(
             "00000000-0000-0000-0000-000000000017"
         ));
@@ -612,8 +627,12 @@ mod shape_unit_tests {
     fn rejects_real_looking_strings() {
         assert!(!is_redactor_output_shape_safe("alice@example.com"));
         assert!(!is_redactor_output_shape_safe("https://github.com"));
-        assert!(!is_redactor_output_shape_safe("https://service0042.example.test/github"));
-        assert!(!is_redactor_output_shape_safe("androidapp://com.github.android"));
+        assert!(!is_redactor_output_shape_safe(
+            "https://service0042.example.test/github"
+        ));
+        assert!(!is_redactor_output_shape_safe(
+            "androidapp://com.github.android"
+        ));
         assert!(!is_redactor_output_shape_safe("hunter2"));
         assert!(!is_redactor_output_shape_safe("real note text"));
         assert!(!is_redactor_output_shape_safe(

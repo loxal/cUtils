@@ -106,8 +106,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let text = fs::read_to_string(&cli.input)
         .map_err(|e| format!("reading {}: {e}", cli.input.display()))?;
-    let data: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("parsing {}: {e}", cli.input.display()))?;
+    let data: Value =
+        serde_json::from_str(&text).map_err(|e| format!("parsing {}: {e}", cli.input.display()))?;
 
     let items = data
         .get("items")
@@ -290,10 +290,22 @@ fn compute_ranks(items: &[Value], group_ids: &[usize]) -> Vec<usize> {
     for indices in by_group.into_values() {
         let mut ordered = indices;
         ordered.sort_by(|&a, &b| {
-            let a_rev = items[a].get("revisionDate").and_then(Value::as_str).unwrap_or("");
-            let b_rev = items[b].get("revisionDate").and_then(Value::as_str).unwrap_or("");
-            let a_cre = items[a].get("creationDate").and_then(Value::as_str).unwrap_or("");
-            let b_cre = items[b].get("creationDate").and_then(Value::as_str).unwrap_or("");
+            let a_rev = items[a]
+                .get("revisionDate")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let b_rev = items[b]
+                .get("revisionDate")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let a_cre = items[a]
+                .get("creationDate")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let b_cre = items[b]
+                .get("creationDate")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             (b_rev, b_cre).cmp(&(a_rev, a_cre))
         });
         for (rank, idx) in ordered.into_iter().enumerate() {
@@ -649,10 +661,7 @@ fn scrub_item(
     obj.insert("revisionDate".into(), json!(synth_revision_date(rank)));
     obj.insert(
         "deletedDate".into(),
-        if item
-            .get("deletedDate")
-            .is_some_and(|v| !v.is_null())
-        {
+        if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
             json!(synth_deleted_date(rank))
         } else {
             Value::Null
