@@ -143,9 +143,6 @@ survivor so nothing the user typed is lost.
 
 Items that are **never** grouped (passed through byte-identical):
 
-- **Cards (`type: 3`)** and **identities (`type: 4`)** — no obvious
-  structured equality we'd trust for dedup, so they bypass the
-  pipeline entirely.
 - items with `reprompt == 1` (master-password gated — too sensitive to
   auto-merge)
 - items with an empty password (would spuriously group on `""`) —
@@ -172,6 +169,45 @@ then newer `creationDate`. The surviving SSH key's key material is
 never modified — only name (longest raw name wins), favorite (OR),
 custom-field union, collection-id union, and folder-disambiguation
 note get merged.
+
+### Cards (`type: 3`) dedup
+
+Cards run through the same strict-equality pass as SSH keys. Two
+cards collapse only when **every byte** of the `card` block matches
+— `cardholderName`, `brand`, `number`, `expMonth`, `expYear`, `code`
+(CVV) — plus a normalized name and the organization id. Any
+mismatch in any field keeps items distinct: a different CVV, a
+different expiry month, even a trailing space in the cardholder
+name keeps the items separate. This is intentionally conservative;
+the cost of over-merging stored card data is the wrong card on
+file, and that's a class of error worth refusing.
+
+Survivor selection: newer `revisionDate`, then newer `creationDate`.
+The surviving card's `card` block is byte-identical to every drop's
+by construction (everything is in the grouping key), so the survivor
+keeps its own block untouched. Only metadata merges: longest name,
+favorite OR, custom-field union, collection-id union, and folder
+disambiguation note. Audit entries carry `"item_kind": "card"`.
+
+### Identities (`type: 4`) dedup
+
+Identities follow the same strict-equality pattern. Every populated
+field of the `identity` block participates in the grouping key:
+`title`, `firstName`, `middleName`, `lastName`, `address1..3`,
+`city`, `state`, `postalCode`, `country`, `company`, `email`,
+`phone`, `ssn`, `username`, `passportNumber`, `licenseNumber`. Plus
+the normalized name and organization id. Any mismatch in any
+populated field keeps items distinct.
+
+Same survivor-selection and merge rules as cards — the `identity`
+block is byte-identical across the group, only metadata merges onto
+the survivor. Audit entries carry `"item_kind": "identity"`.
+
+> Both passes run by default — there is no opt-in flag. The strict-
+> equality bar is the safety floor: we only collapse items that are
+> indistinguishable in every credential-relevant field. Losers route
+> to the trash sidecar like every other dedup loser, so any
+> disagreement with a merge is recoverable.
 
 ### Folder dedup
 
@@ -635,12 +671,14 @@ by `tests/fixture.rs` so the docs can't drift from the code:
 
 ```
 Input:         examples/bitwarden_export_20260411172632.json
-               22 items total, 7 skipped from dedup
-Groups:        5 strict duplicate groups
-Removed:       6 items (kept newest by revisionDate)
+               22 items total, 7 skipped by strict pass
+Groups:        5 total dedup groups
+                 strict login: 5
+Trashed:       6 items routed out of the active `items` array (survivor picked by longer passwordHistory, then newer revisionDate)
 URIs merged:   3 unique URLs preserved from dropped items
+               (notes, custom fields, TOTP, passwordHistory, collections, folders — all merged into survivors)
 Output:        /tmp/example.dedup.json
-               16 items
+               15 items — all living (clean import into Bitwarden's active vault)
 ```
 
 ### Regenerating the committed fixture

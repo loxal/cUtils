@@ -24,7 +24,14 @@
 //! 4. **SSH-key dedup** — group `type: 5` items by
 //!    [`crate::key::ssh_key_key`] (full canonicalized key material +
 //!    org); any byte-level mismatch keeps items separate.
-//! 5. **Folder dedup** — collapse same-name folders in the top-level
+//! 5. **Card dedup** — group `type: 3` items by
+//!    [`crate::key::card_key`] (full canonicalized `card` object +
+//!    org). Strict equality: any byte mismatch on number, expiry,
+//!    CVV, brand, or cardholder name keeps items distinct.
+//! 6. **Identity dedup** — group `type: 4` items by
+//!    [`crate::key::identity_key`] (full canonicalized `identity`
+//!    object + org). Strict equality on every populated field.
+//! 7. **Folder dedup** — collapse same-name folders in the top-level
 //!    `folders` array and remap every item's `folderId` to the
 //!    surviving folder. Runs in [`dedup_export`] before items are
 //!    handed to the four item-level passes above so divergent-folder
@@ -43,13 +50,13 @@ use serde_json::{Value, json};
 
 use crate::json_util::get_str;
 use crate::key::{
-    dedup_key, empty_password_dedup_key, is_dedupable_empty_password_login,
-    is_dedupable_secure_note, is_dedupable_ssh_key, secure_note_key, skip_from_dedup, ssh_key_key,
-    uri_host_set,
+    card_key, dedup_key, empty_password_dedup_key, identity_key, is_dedupable_card,
+    is_dedupable_empty_password_login, is_dedupable_identity, is_dedupable_secure_note,
+    is_dedupable_ssh_key, secure_note_key, skip_from_dedup, ssh_key_key, uri_host_set,
 };
 use crate::merge::{
-    SecureNotePatch, SshKeyPatch, SurvivorPatch, apply_secure_note_patch, apply_ssh_key_patch,
-    apply_survivor_patch, build_secure_note_patch, build_ssh_key_patch, build_survivor_patch,
+    MetadataPatch, SecureNotePatch, SurvivorPatch, apply_metadata_patch, apply_secure_note_patch,
+    apply_survivor_patch, build_metadata_patch, build_secure_note_patch, build_survivor_patch,
     secure_note_source_label,
 };
 use crate::time_util::iso8601_now;
@@ -147,7 +154,10 @@ impl SignalKind {
 ///                empty-password pass (Pass 2) — `skipped` is
 ///                strict-pass-local, not "skipped by every pass".
 ///                Audit JSON publishes this as `strict_pass_skipped`.
-/// - `groups`   — number of strict duplicate groups found
+/// - `groups`   — total dedup groups across **all** passes (sum of
+///                `strict_login_groups` + `empty_password_groups` +
+///                `secure_note_groups` + `ssh_key_groups`). Read the
+///                per-pass counters for a breakdown.
 /// - `trashed`  — number of items freshly moved to Trash by this run
 ///                (dedup losers — they stay in the output array with
 ///                `deletedDate = now` so Bitwarden shows them in the Trash
@@ -182,6 +192,18 @@ pub struct DedupStats {
     pub empty_password_groups_by_signal: BTreeMap<SignalKind, usize>,
     pub secure_note_groups: usize,
     pub ssh_key_groups: usize,
+    /// Card (`type: 3`) duplicate groups collapsed by the strict-
+    /// equality card pass. Cards collapse only when every field of
+    /// the `card` block (number, expiry, CVV, brand, cardholder
+    /// name) is byte-identical and the names normalize to the same
+    /// value within the same organization.
+    pub card_groups: usize,
+    /// Identity (`type: 4`) duplicate groups collapsed by the
+    /// strict-equality identity pass. Identities collapse only when
+    /// every field of the `identity` block (name, address, email,
+    /// phone, government IDs) is byte-identical and the item names
+    /// match within the same organization.
+    pub identity_groups: usize,
     pub trashed: usize,
     pub merged: usize,
     pub totp_conflict_groups: usize,
@@ -542,14 +564,33 @@ pub(crate) fn dedup_items_with_folders(
     // Pass 6: SSH key dedup.
     let (ssh_groups, ssh_trashed, ssh_audit_entries) = dedup_ssh_keys(items, folders, &now);
 
+    // Pass 7: Card dedup (strict equality on every populated card field).
+    let (card_groups, card_trashed, card_audit_entries) = dedup_cards(items, folders, &now);
+
+    // Pass 8: Identity dedup (strict equality on every populated identity field).
+    let (identity_groups, identity_trashed, identity_audit_entries) =
+        dedup_identities(items, folders, &now);
+
     // Combined counts cover every pass.
     let strict_login_groups = dupe_groups.len();
-    let trashed = to_drop.len() + epw_outcome.trashed + note_trashed + ssh_trashed;
-    let groups_total = strict_login_groups + epw_outcome.groups + note_groups + ssh_groups;
+    let trashed = to_drop.len()
+        + epw_outcome.trashed
+        + note_trashed
+        + ssh_trashed
+        + card_trashed
+        + identity_trashed;
+    let groups_total = strict_login_groups
+        + epw_outcome.groups
+        + note_groups
+        + ssh_groups
+        + card_groups
+        + identity_groups;
     let mut combined_audit = audit_entries;
     combined_audit.extend(epw_outcome.audit_entries);
     combined_audit.extend(note_audit_entries);
     combined_audit.extend(ssh_audit_entries);
+    combined_audit.extend(card_audit_entries);
+    combined_audit.extend(identity_audit_entries);
     total_merged += epw_outcome.uris_merged;
     totp_conflict_groups += epw_outcome.totp_conflict_groups;
 
@@ -569,6 +610,8 @@ pub(crate) fn dedup_items_with_folders(
         empty_password_groups_by_signal: epw_outcome.groups_by_signal,
         secure_note_groups: note_groups,
         ssh_key_groups: ssh_groups,
+        card_groups,
+        identity_groups,
         trashed,
         merged: total_merged,
         totp_conflict_groups,
@@ -851,30 +894,74 @@ fn secure_note_non_csv_rank(item: &Value) -> u8 {
     }
 }
 
-/// Third dedup pass: SSH keys (`type: 5`). Groups by
-/// [`ssh_key_key`] (full canonicalized `sshKey` object + org), picks a
-/// survivor by newer `revisionDate` then newer `creationDate`, trashes
-/// the losers. Key material is never merged — it's in the grouping
-/// key, so every item in a group already has the exact same public
-/// key, private key, and fingerprint.
+/// SSH-key (`type: 5`) dedup — strict equality on the full `sshKey`
+/// object + org. Thin wrapper over [`dedup_strict_metadata_pass`].
 fn dedup_ssh_keys(
     items: &mut Vec<Value>,
     folders: &HashMap<String, String>,
     now: &str,
 ) -> (usize, usize, Vec<Value>) {
+    dedup_strict_metadata_pass(items, folders, now, "ssh_key", is_dedupable_ssh_key, ssh_key_key)
+}
+
+/// Card (`type: 3`) dedup — strict equality on the full `card`
+/// object (number, expiry, CVV, brand, cardholder name) + org.
+fn dedup_cards(
+    items: &mut Vec<Value>,
+    folders: &HashMap<String, String>,
+    now: &str,
+) -> (usize, usize, Vec<Value>) {
+    dedup_strict_metadata_pass(items, folders, now, "card", is_dedupable_card, card_key)
+}
+
+/// Identity (`type: 4`) dedup — strict equality on the full
+/// `identity` object (name, address, email, phone, government IDs)
+/// + org.
+fn dedup_identities(
+    items: &mut Vec<Value>,
+    folders: &HashMap<String, String>,
+    now: &str,
+) -> (usize, usize, Vec<Value>) {
+    dedup_strict_metadata_pass(
+        items,
+        folders,
+        now,
+        "identity",
+        is_dedupable_identity,
+        identity_key,
+    )
+}
+
+/// Generic strict-equality dedup pass for non-login item types where
+/// the credential / structured data is **part of the grouping key**
+/// (SSH keys, cards, identities). Groups by `key_fn`, picks a
+/// survivor by newer `revisionDate` then newer `creationDate`, and
+/// merges only metadata (longest name, favorite OR, fields,
+/// collections, folder note) onto the survivor — the type-specific
+/// data block is byte-identical across the group by construction.
+///
+/// Returns `(groups_collapsed, items_trashed, audit_entries)`.
+fn dedup_strict_metadata_pass(
+    items: &mut [Value],
+    folders: &HashMap<String, String>,
+    now: &str,
+    item_kind: &'static str,
+    is_dedupable: fn(&Value) -> bool,
+    key_fn: fn(&Value) -> String,
+) -> (usize, usize, Vec<Value>) {
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, item) in items.iter().enumerate() {
-        if !is_dedupable_ssh_key(item) {
+        if !is_dedupable(item) {
             continue;
         }
-        groups.entry(ssh_key_key(item)).or_default().push(idx);
+        groups.entry(key_fn(item)).or_default().push(idx);
     }
     let mut dupe_groups: Vec<Vec<usize>> = groups.into_values().filter(|v| v.len() > 1).collect();
     dupe_groups.sort_by_key(|g| *g.first().unwrap_or(&0));
 
     let mut to_drop: HashSet<usize> = HashSet::new();
     let mut audit_entries: Vec<Value> = Vec::new();
-    let mut patches: Vec<(usize, SshKeyPatch)> = Vec::new();
+    let mut patches: Vec<(usize, MetadataPatch)> = Vec::new();
 
     for group in &dupe_groups {
         let mut ordered = group.clone();
@@ -890,7 +977,7 @@ fn dedup_ssh_keys(
 
         let keep = &items[keep_idx];
         let drops: Vec<&Value> = drop_idxs.iter().map(|i| &items[*i]).collect();
-        let patch = build_ssh_key_patch(keep, &drops, folders);
+        let patch = build_metadata_patch(keep, &drops, folders);
 
         let keep_id = keep.get("id").cloned().unwrap_or(Value::Null);
         let keep_name_audit = Value::String(patch.longest_name.clone());
@@ -904,7 +991,7 @@ fn dedup_ssh_keys(
             to_drop.insert(di);
             let dropped = &items[di];
             audit_entries.push(json!({
-                "item_kind": "ssh_key",
+                "item_kind": item_kind,
                 "removed_id": dropped.get("id").cloned().unwrap_or(Value::Null),
                 "removed_name": dropped.get("name").cloned().unwrap_or(Value::Null),
                 "removed_revisionDate": dropped.get("revisionDate").cloned().unwrap_or(Value::Null),
@@ -924,7 +1011,7 @@ fn dedup_ssh_keys(
     }
 
     for (keep_idx, patch) in patches {
-        apply_ssh_key_patch(&mut items[keep_idx], patch);
+        apply_metadata_patch(&mut items[keep_idx], patch);
     }
     for (i, item) in items.iter_mut().enumerate() {
         if to_drop.contains(&i)
@@ -1520,6 +1607,195 @@ mod tests {
                 + stats.secure_note_groups
                 + stats.ssh_key_groups
         );
+    }
+
+    // ---------- card / identity dedup passes ----------
+
+    #[test]
+    fn cards_with_identical_block_collapse() {
+        let mut items = vec![
+            json!({
+                "id": "c1", "type": 3, "name": "Visa Personal",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "card": {
+                    "cardholderName": "Alex Orlov", "brand": "Visa",
+                    "number": "4111111111111111", "expMonth": "12",
+                    "expYear": "2030", "code": "123"
+                }
+            }),
+            json!({
+                "id": "c2", "type": 3, "name": "Visa Personal",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "card": {
+                    "cardholderName": "Alex Orlov", "brand": "Visa",
+                    "number": "4111111111111111", "expMonth": "12",
+                    "expYear": "2030", "code": "123"
+                }
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.card_groups, 1);
+        assert_eq!(stats.trashed, 1);
+        assert_eq!(stats.living, 1);
+        // Newer revisionDate wins as survivor.
+        let living_id = items
+            .iter()
+            .find(|i| i["deletedDate"].is_null())
+            .unwrap()["id"]
+            .as_str()
+            .unwrap();
+        assert_eq!(living_id, "c2");
+    }
+
+    #[test]
+    fn cards_with_different_cvv_stay_split() {
+        let mut items = vec![
+            json!({
+                "id": "c1", "type": 3, "name": "Visa",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "card": {"cardholderName": "A", "brand": "Visa",
+                    "number": "4111111111111111", "expMonth": "12",
+                    "expYear": "2030", "code": "123"}
+            }),
+            json!({
+                "id": "c2", "type": 3, "name": "Visa",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "card": {"cardholderName": "A", "brand": "Visa",
+                    "number": "4111111111111111", "expMonth": "12",
+                    "expYear": "2030", "code": "999"}
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.card_groups, 0, "different CVV must keep cards split");
+        assert_eq!(stats.living, 2);
+    }
+
+    #[test]
+    fn identities_with_identical_block_collapse() {
+        let mut items = vec![
+            json!({
+                "id": "i1", "type": 4, "name": "my",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "identity": {
+                    "firstName": "Alex", "lastName": "Orlov",
+                    "email": "alex@example.test", "city": "Zurich"
+                }
+            }),
+            json!({
+                "id": "i2", "type": 4, "name": "my",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "identity": {
+                    "firstName": "Alex", "lastName": "Orlov",
+                    "email": "alex@example.test", "city": "Zurich"
+                }
+            }),
+            json!({
+                "id": "i3", "type": 4, "name": "my",
+                "revisionDate": "2026-01-03T00:00:00Z",
+                "identity": {
+                    "firstName": "Alex", "lastName": "Orlov",
+                    "email": "alex@example.test", "city": "Zurich"
+                }
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.identity_groups, 1);
+        assert_eq!(stats.trashed, 2);
+        assert_eq!(stats.living, 1);
+    }
+
+    #[test]
+    fn identities_with_different_address_stay_split() {
+        let mut items = vec![
+            json!({
+                "id": "i1", "type": 4, "name": "home",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "identity": {"firstName": "Alex", "address1": "1 Example St"}
+            }),
+            json!({
+                "id": "i2", "type": 4, "name": "home",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "identity": {"firstName": "Alex", "address1": "2 Other St"}
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.identity_groups, 0);
+        assert_eq!(stats.living, 2);
+    }
+
+    #[test]
+    fn cards_and_identities_audit_entries_carry_correct_item_kind() {
+        let mut items = vec![
+            // Two identical cards
+            json!({
+                "id": "c1", "type": 3, "name": "Visa",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "card": {"number": "4111", "expMonth": "12", "expYear": "2030"}
+            }),
+            json!({
+                "id": "c2", "type": 3, "name": "Visa",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "card": {"number": "4111", "expMonth": "12", "expYear": "2030"}
+            }),
+            // Two identical identities
+            json!({
+                "id": "i1", "type": 4, "name": "my",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "identity": {"firstName": "Alex"}
+            }),
+            json!({
+                "id": "i2", "type": 4, "name": "my",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "identity": {"firstName": "Alex"}
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.card_groups, 1);
+        assert_eq!(stats.identity_groups, 1);
+        assert_eq!(stats.audit_entries.len(), 2);
+
+        let card_entry = stats
+            .audit_entries
+            .iter()
+            .find(|e| e["item_kind"] == "card")
+            .expect("a card audit entry must exist");
+        assert_eq!(card_entry["removed_id"], "c1");
+        assert_eq!(card_entry["kept_id"], "c2");
+
+        let identity_entry = stats
+            .audit_entries
+            .iter()
+            .find(|e| e["item_kind"] == "identity")
+            .expect("an identity audit entry must exist");
+        assert_eq!(identity_entry["removed_id"], "i1");
+        assert_eq!(identity_entry["kept_id"], "i2");
+    }
+
+    #[test]
+    fn cards_preserve_card_block_byte_identical_on_survivor() {
+        // Sanity: the survivor's `card` block is exactly what it was —
+        // strict equality means every drop's block matched the keeper's
+        // by construction, so we do NOT touch it.
+        let mut items = vec![
+            json!({
+                "id": "c1", "type": 3, "name": "Visa",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "card": {"number": "4111", "expMonth": "12", "expYear": "2030", "code": "123"}
+            }),
+            json!({
+                "id": "c2", "type": 3, "name": "Visa",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "card": {"number": "4111", "expMonth": "12", "expYear": "2030", "code": "123"}
+            }),
+        ];
+        dedup_items(&mut items);
+        let survivor = items
+            .iter()
+            .find(|i| i["deletedDate"].is_null())
+            .unwrap();
+        assert_eq!(survivor["card"]["number"], "4111");
+        assert_eq!(survivor["card"]["expMonth"], "12");
+        assert_eq!(survivor["card"]["code"], "123");
     }
 
     #[test]

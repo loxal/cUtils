@@ -152,6 +152,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "empty_password_groups_by_signal": stats.empty_password_groups_by_signal,
         "secure_note_groups": stats.secure_note_groups,
         "ssh_key_groups": stats.ssh_key_groups,
+        "card_groups": stats.card_groups,
+        "identity_groups": stats.identity_groups,
         "totp_conflict_groups": stats.totp_conflict_groups,
         "folders_deduplicated": stats.folders_deduplicated,
         // Strict-pass-local skip count: items the strict login pass
@@ -162,6 +164,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // `empty_password_groups` / `empty_password_trashed` for the
         // full picture.
         "strict_pass_skipped": stats.skipped,
+        // Back-compat alias — same value under the old key name so
+        // any audit-grep tooling written against earlier releases
+        // keeps working. New consumers should read
+        // `strict_pass_skipped` for the more accurate label.
+        "skipped_from_dedup": stats.skipped,
         "uris_merged_into_kept_total": stats.merged,
         "entries": stats.audit_entries,
     });
@@ -203,6 +210,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     if stats.ssh_key_groups > 0 {
         println!("                 ssh key: {}", stats.ssh_key_groups);
+    }
+    if stats.card_groups > 0 {
+        println!("                 card: {}", stats.card_groups);
+    }
+    if stats.identity_groups > 0 {
+        println!("                 identity: {}", stats.identity_groups);
     }
     if stats.folders_deduplicated > 0 {
         println!(

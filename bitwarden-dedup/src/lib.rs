@@ -15,7 +15,9 @@
 //!   survivor-patching rules (notes, URIs, passwordHistory, custom fields,
 //!   collectionIds, folder disambiguation notes, favorite flag).
 //! - **"Which item survives, and what's the audit trail?"** — [`pipeline`]
-//!   orchestrates the four-pass run and builds [`DedupStats`].
+//!   orchestrates the multi-pass run (strict login, opt-in
+//!   empty-password login, secure notes, SSH keys, plus a folder
+//!   collapse) and builds [`DedupStats`].
 //!
 //! URI-set logic lives in [`uris`] because both the key layer and the merge
 //! layer treat URIs as opaque strings with no case folding.
@@ -38,8 +40,9 @@ pub use icloud::{
     MergeStats, merge_icloud_csv_into_export, merge_icloud_csv_into_export_with_config,
 };
 pub use key::{
-    HostKind, dedup_key, empty_password_dedup_key, host_of, is_dedupable_empty_password_login,
-    normalize_name, skip_from_dedup,
+    HostKind, card_key, dedup_key, empty_password_dedup_key, host_of, identity_key,
+    is_dedupable_card, is_dedupable_empty_password_login, is_dedupable_identity, normalize_name,
+    skip_from_dedup,
 };
 pub use pipeline::{
     DedupConfig, DedupStats, SignalKind, dedup_export, dedup_export_with_config, dedup_items,

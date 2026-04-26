@@ -208,14 +208,21 @@ pub fn empty_password_dedup_key(item: &Value) -> String {
     );
     let mut hosts: Vec<(HostKind, String)> = uri_host_set(item).into_iter().collect();
     hosts.sort();
-    // Length-prefixed pair encoding: `<len>:<kind>:<host_token>` per
-    // pair, separated by NUL. Opaque host tokens are arbitrary user
-    // strings, so a naive `join(",")` is delimiter-ambiguous — an
-    // opaque host whose text happens to contain `,Opaque:` or
-    // `,Dns:` collides with a two-host set under that scheme. The
-    // length prefix on the host token alone makes any embedded
-    // delimiter byte safe; sorted-pair order keeps the encoding
-    // canonical.
+    // Length-prefixed pair encoding: `<kind>:<len>:<host_token>` per
+    // pair, separated by `\x1f` (ASCII unit-separator). Opaque host
+    // tokens are arbitrary user strings, so a naive `join(",")` over
+    // `<kind>:<host_token>` is delimiter-ambiguous — an opaque host
+    // whose text happens to contain `,Opaque:` or `,Dns:` collides
+    // with a two-host set under that scheme. The fix that matters
+    // for safety is the length prefix on the host token: it lets
+    // any reader (or any equality comparison against a different
+    // input) consume exactly `<len>` bytes of host text regardless
+    // of what those bytes contain, so two different `(HostKind,
+    // host_token)` sets cannot serialize to the same string. The
+    // `\x1f` separator is defensive: it lowers the chance of an
+    // opaque token ever containing the pair delimiter, but the
+    // encoding is unambiguous even without it because the length
+    // prefix is the load-bearing safety mechanism.
     let host_blob = hosts
         .iter()
         .map(|(k, h)| format!("{k:?}:{}:{h}", h.len()))
@@ -494,6 +501,118 @@ pub fn ssh_key_key(item: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("");
     format!("type=5\0ssh={ssh_sig}\0org={org}")
+}
+
+/// Return `true` when the item is a card (`type: 3`) that the dedup
+/// pipeline should consider for grouping.
+///
+/// Cards dedup by [`card_key`] — every field of the `card` object
+/// (`cardholderName`, `brand`, `number`, `expMonth`, `expYear`,
+/// `code`) plus the organization id participates in the key. Two
+/// cards collapse only when **all** of those bytes are identical. A
+/// stored card with a different CVV, a different expiry, or even a
+/// trailing whitespace difference in the cardholder name keeps items
+/// distinct.
+///
+/// The same safety floor applies as for logins: trashed, reprompt-
+/// gated, and `[duplicate]`-tagged items pass through untouched.
+/// Items with no `card` block at all are refused — there is nothing
+/// stable to group on.
+pub fn is_dedupable_card(item: &Value) -> bool {
+    if item.get("type").and_then(Value::as_u64) != Some(3) {
+        return false;
+    }
+    if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    if item.get("reprompt").and_then(Value::as_u64) == Some(1) {
+        return false;
+    }
+    if get_str(item, "name").contains("[duplicate]") {
+        return false;
+    }
+    item.get("card").is_some()
+}
+
+/// Grouping key for cards (`type: 3`).
+///
+/// Combines:
+/// - `type=3` prefix — never collides with login / secure-note / SSH keys.
+/// - Normalized name (case-fold, email-suffix strip — same rule
+///   logins use, since cards saved via browser auto-fill often pick
+///   up the `(email@…)` suffix).
+/// - `organizationId` — personal and org-owned cards stay separate.
+/// - Canonicalized full `card` object (alphabetical-key
+///   serialization). Any byte-level mismatch in any populated field
+///   keeps items distinct — same conservative bias as
+///   [`ssh_key_key`]: when in doubt, never merge.
+pub fn card_key(item: &Value) -> String {
+    let name = normalize_name(get_str(item, "name"));
+    let org = item
+        .get("organizationId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let card_sig = canonical_object_signature(item.get("card"));
+    format!("type=3\0name={name}\0org={org}\0card={card_sig}")
+}
+
+/// Return `true` when the item is an identity (`type: 4`) that the
+/// dedup pipeline should consider for grouping.
+///
+/// Identities dedup by [`identity_key`] — every field of the
+/// `identity` object plus the organization id participates in the
+/// key. Two identities collapse only when **all** of those bytes are
+/// identical (same name, address, email, phone, government IDs,
+/// etc.). Any mismatch in any field keeps items distinct.
+///
+/// Same safety floor as cards: trashed, reprompt-gated, and
+/// `[duplicate]`-tagged items pass through; items without an
+/// `identity` block are refused.
+pub fn is_dedupable_identity(item: &Value) -> bool {
+    if item.get("type").and_then(Value::as_u64) != Some(4) {
+        return false;
+    }
+    if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    if item.get("reprompt").and_then(Value::as_u64) == Some(1) {
+        return false;
+    }
+    if get_str(item, "name").contains("[duplicate]") {
+        return false;
+    }
+    item.get("identity").is_some()
+}
+
+/// Grouping key for identities (`type: 4`).
+///
+/// Combines:
+/// - `type=4` prefix — never collides with other types.
+/// - Normalized name (same rule as logins / cards).
+/// - `organizationId` — personal vs org never cross-dedup.
+/// - Canonicalized full `identity` object. Every populated field
+///   (firstName/lastName/address/email/phone/ssn/passportNumber/
+///   licenseNumber/etc.) participates; any byte-level mismatch
+///   keeps items distinct.
+pub fn identity_key(item: &Value) -> String {
+    let name = normalize_name(get_str(item, "name"));
+    let org = item
+        .get("organizationId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let identity_sig = canonical_object_signature(item.get("identity"));
+    format!("type=4\0name={name}\0org={org}\0identity={identity_sig}")
+}
+
+/// Canonical signature of an arbitrary JSON object — alphabetical
+/// key order via `serde_json::Value`'s BTreeMap-backed Map. Used by
+/// the strict-equality dedup keys for cards and identities. Returns
+/// the empty string when the object is missing.
+fn canonical_object_signature(obj: Option<&Value>) -> String {
+    match obj {
+        Some(v) => serde_json::to_string(v).unwrap_or_default(),
+        None => String::new(),
+    }
 }
 
 fn ssh_canonical_signature(item: &Value) -> String {
@@ -1437,5 +1556,188 @@ mod tests {
         // empty name → skip (nothing stable to group on)
         base["name"] = json!("   ");
         assert!(!is_dedupable_secure_note(&base));
+    }
+
+    // ---------- card dedup ----------
+
+    fn card_item(name: &str, number: &str, exp_month: &str, exp_year: &str, code: &str) -> Value {
+        json!({
+            "type": 3,
+            "name": name,
+            "card": {
+                "cardholderName": "Alex Orlov",
+                "brand": "Visa",
+                "number": number,
+                "expMonth": exp_month,
+                "expYear": exp_year,
+                "code": code,
+            }
+        })
+    }
+
+    #[test]
+    fn card_key_matches_when_card_block_byte_identical() {
+        let a = card_item("Visa Personal", "4111111111111111", "12", "2030", "123");
+        let b = card_item("Visa Personal", "4111111111111111", "12", "2030", "123");
+        assert_eq!(card_key(&a), card_key(&b));
+    }
+
+    #[test]
+    fn card_key_differs_on_number_expiry_or_cvv() {
+        let base = card_item("Visa", "4111111111111111", "12", "2030", "123");
+        let mut diff_num = base.clone();
+        diff_num["card"]["number"] = json!("4111111111110000");
+        assert_ne!(card_key(&base), card_key(&diff_num));
+
+        let mut diff_exp = base.clone();
+        diff_exp["card"]["expMonth"] = json!("11");
+        assert_ne!(card_key(&base), card_key(&diff_exp));
+
+        let mut diff_cvv = base.clone();
+        diff_cvv["card"]["code"] = json!("999");
+        assert_ne!(card_key(&base), card_key(&diff_cvv));
+    }
+
+    #[test]
+    fn card_key_differs_on_cardholder_whitespace() {
+        // Trailing-space difference in cardholder name keeps items
+        // distinct — we never merge stored card data on near-equality.
+        let a = card_item("Visa", "4111111111111111", "12", "2030", "123");
+        let mut b = a.clone();
+        b["card"]["cardholderName"] = json!("Alex Orlov ");
+        assert_ne!(card_key(&a), card_key(&b));
+    }
+
+    #[test]
+    fn card_key_strips_email_suffix_from_name() {
+        let mut a = card_item("Visa Personal", "4111", "12", "2030", "123");
+        let mut b = card_item("Visa Personal (alex@example.test)", "4111", "12", "2030", "123");
+        a["organizationId"] = Value::Null;
+        b["organizationId"] = Value::Null;
+        assert_eq!(card_key(&a), card_key(&b));
+    }
+
+    #[test]
+    fn card_key_separates_personal_and_org() {
+        let mut a = card_item("Visa", "4111", "12", "2030", "123");
+        let mut b = card_item("Visa", "4111", "12", "2030", "123");
+        a["organizationId"] = Value::Null;
+        b["organizationId"] = json!("11111111-1111-1111-1111-111111111111");
+        assert_ne!(card_key(&a), card_key(&b));
+    }
+
+    #[test]
+    fn is_dedupable_card_filters_correctly() {
+        let base = card_item("Visa", "4111", "12", "2030", "123");
+        assert!(is_dedupable_card(&base));
+
+        // Non-card type
+        let mut not_card = base.clone();
+        not_card["type"] = json!(1);
+        assert!(!is_dedupable_card(&not_card));
+
+        // Trashed
+        let mut trashed = base.clone();
+        trashed["deletedDate"] = json!("2026-01-01T00:00:00Z");
+        assert!(!is_dedupable_card(&trashed));
+
+        // Reprompt-gated
+        let mut reprompt = base.clone();
+        reprompt["reprompt"] = json!(1);
+        assert!(!is_dedupable_card(&reprompt));
+
+        // Already-tagged
+        let mut tagged = base.clone();
+        tagged["name"] = json!("Visa [duplicate]");
+        assert!(!is_dedupable_card(&tagged));
+
+        // Missing card block — refuse to group on item-level metadata alone
+        let no_block = json!({"type": 3, "name": "Visa"});
+        assert!(!is_dedupable_card(&no_block));
+    }
+
+    #[test]
+    fn card_key_distinct_from_other_type_keys() {
+        // type=3 prefix must not collide with login / note / ssh-key namespaces.
+        let card = card_item("X", "4111", "12", "2030", "123");
+        assert!(card_key(&card).starts_with("type=3\0"));
+    }
+
+    // ---------- identity dedup ----------
+
+    fn identity_item(name: &str, first: &str, last: &str, email: &str) -> Value {
+        json!({
+            "type": 4,
+            "name": name,
+            "identity": {
+                "firstName": first,
+                "lastName": last,
+                "email": email,
+                "address1": "1 Example St",
+                "city": "Zurich",
+                "country": "CH",
+            }
+        })
+    }
+
+    #[test]
+    fn identity_key_matches_when_identity_block_byte_identical() {
+        let a = identity_item("my", "Alexander", "Orlov", "alex@example.test");
+        let b = identity_item("my", "Alexander", "Orlov", "alex@example.test");
+        assert_eq!(identity_key(&a), identity_key(&b));
+    }
+
+    #[test]
+    fn identity_key_differs_on_any_field() {
+        let base = identity_item("my", "Alexander", "Orlov", "alex@example.test");
+        let mut diff_first = base.clone();
+        diff_first["identity"]["firstName"] = json!("Alex");
+        assert_ne!(identity_key(&base), identity_key(&diff_first));
+
+        let mut diff_email = base.clone();
+        diff_email["identity"]["email"] = json!("other@example.test");
+        assert_ne!(identity_key(&base), identity_key(&diff_email));
+
+        let mut diff_addr = base.clone();
+        diff_addr["identity"]["address1"] = json!("2 Other St");
+        assert_ne!(identity_key(&base), identity_key(&diff_addr));
+    }
+
+    #[test]
+    fn identity_key_separates_personal_and_org() {
+        let mut a = identity_item("my", "Alex", "Orlov", "u@example.test");
+        let mut b = identity_item("my", "Alex", "Orlov", "u@example.test");
+        a["organizationId"] = Value::Null;
+        b["organizationId"] = json!("11111111-1111-1111-1111-111111111111");
+        assert_ne!(identity_key(&a), identity_key(&b));
+    }
+
+    #[test]
+    fn is_dedupable_identity_filters_correctly() {
+        let base = identity_item("my", "Alex", "Orlov", "u@example.test");
+        assert!(is_dedupable_identity(&base));
+
+        let mut not_identity = base.clone();
+        not_identity["type"] = json!(1);
+        assert!(!is_dedupable_identity(&not_identity));
+
+        let mut trashed = base.clone();
+        trashed["deletedDate"] = json!("2026-01-01T00:00:00Z");
+        assert!(!is_dedupable_identity(&trashed));
+
+        let mut reprompt = base.clone();
+        reprompt["reprompt"] = json!(1);
+        assert!(!is_dedupable_identity(&reprompt));
+
+        let no_block = json!({"type": 4, "name": "x"});
+        assert!(!is_dedupable_identity(&no_block));
+    }
+
+    #[test]
+    fn identity_key_distinct_from_card_key() {
+        let card = card_item("X", "4111", "12", "2030", "123");
+        let identity = identity_item("X", "Alex", "Orlov", "u@example.test");
+        // Different type prefix → different namespace even with same name.
+        assert_ne!(card_key(&card), identity_key(&identity));
     }
 }

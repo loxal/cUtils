@@ -382,18 +382,16 @@ pub(crate) fn secure_note_source_label(item: &Value) -> &'static str {
     }
 }
 
-/// Everything the pipeline needs to apply to a surviving SSH key
-/// (`type: 5`) after its duplicate group has been picked.
-///
-/// SSH keys group under a strict key that includes the full `sshKey`
-/// object ([`crate::key::ssh_key_key`]), so by the time we get here
-/// every item in the group shares the exact same key material —
-/// public key, private key, fingerprint. The survivor keeps its own
-/// `sshKey` block untouched; this patch only carries the subset of
-/// survivor-merge data that remains meaningful for an SSH key:
-/// longest name, favorite OR, field/collection unions, folder
-/// disambiguation note.
-pub(crate) struct SshKeyPatch {
+/// Survivor-patch for the **strict-equality** dedup passes (SSH
+/// keys, cards, identities). All three pass classes use a grouping
+/// key that already contains every credential-relevant field of the
+/// item (full `sshKey` object / full `card` object / full `identity`
+/// object), so by the time we get here every item in the group
+/// shares identical credential material. The survivor keeps its own
+/// type-specific block untouched; this patch only carries the merge
+/// subset that remains meaningful: longest name, favorite OR,
+/// field/collection unions, folder disambiguation note.
+pub(crate) struct MetadataPatch {
     pub(crate) longest_name: String,
     pub(crate) field_additions: Vec<Value>,
     pub(crate) collection_additions: Vec<String>,
@@ -401,11 +399,11 @@ pub(crate) struct SshKeyPatch {
     pub(crate) favorite: bool,
 }
 
-pub(crate) fn build_ssh_key_patch(
+pub(crate) fn build_metadata_patch(
     keep: &Value,
     drops: &[&Value],
     folders: &HashMap<String, String>,
-) -> SshKeyPatch {
+) -> MetadataPatch {
     let keep_name = get_str(keep, "name").to_string();
     let mut longest_name = keep_name.clone();
     for d in drops {
@@ -414,7 +412,7 @@ pub(crate) fn build_ssh_key_patch(
             longest_name = dn.to_string();
         }
     }
-    SshKeyPatch {
+    MetadataPatch {
         longest_name,
         field_additions: fields_to_merge(keep, drops),
         collection_additions: collections_to_merge(keep, drops),
@@ -423,9 +421,9 @@ pub(crate) fn build_ssh_key_patch(
     }
 }
 
-pub(crate) fn apply_ssh_key_patch(item: &mut Value, patch: SshKeyPatch) {
-    // Folder-disambiguation line (if any) lands on `notes`; SSH key
-    // material itself is never touched.
+pub(crate) fn apply_metadata_patch(item: &mut Value, patch: MetadataPatch) {
+    // Folder-disambiguation line (if any) lands on `notes`; the
+    // type-specific block (sshKey / card / identity) is never touched.
     let keep_notes = get_str(item, "notes").to_string();
     let final_notes = match patch.folder_note_line.as_deref() {
         Some(line) if !keep_notes.is_empty() => Some(format!("{line}\n{keep_notes}")),

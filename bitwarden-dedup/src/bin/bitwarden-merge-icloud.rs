@@ -180,12 +180,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "empty_password_groups_by_signal": dedup.empty_password_groups_by_signal,
         "secure_note_groups": dedup.secure_note_groups,
         "ssh_key_groups": dedup.ssh_key_groups,
+        "card_groups": dedup.card_groups,
+        "identity_groups": dedup.identity_groups,
         "totp_conflict_groups": dedup.totp_conflict_groups,
         "folders_deduplicated": dedup.folders_deduplicated,
         // Strict-pass-local skip count — see the same field in
         // `bitwarden-dedup --help` for the empty-password-pass
         // interaction.
         "strict_pass_skipped": dedup.skipped,
+        // Back-compat alias — same value under the old key name.
+        "skipped_from_dedup": dedup.skipped,
         "uris_merged_into_kept_total": dedup.merged,
         "entries": dedup.audit_entries.clone(),
     });
@@ -235,6 +239,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     if dedup.ssh_key_groups > 0 {
         println!("                   ssh key: {}", dedup.ssh_key_groups);
+    }
+    if dedup.card_groups > 0 {
+        println!("                   card: {}", dedup.card_groups);
+    }
+    if dedup.identity_groups > 0 {
+        println!("                   identity: {}", dedup.identity_groups);
     }
     if dedup.folders_deduplicated > 0 {
         println!(
