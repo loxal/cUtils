@@ -64,12 +64,12 @@ struct Cli {
     #[arg(long)]
     split_divergent_totps: bool,
 
-    /// Run a second login-dedup pass over credential-less stubs (empty
-    /// `login.password`). Same semantics as `bitwarden-dedup
-    /// --collapse-empty-passwords`; applies to both Bitwarden and CSV
-    /// rows after the merge appends them. Off by default.
+    /// **Skip** the empty-password login dedup pass on the merged
+    /// (Bitwarden + CSV) item set. Same semantics as
+    /// `bitwarden-dedup --keep-empty-password-stubs`. The default is
+    /// to run that pass.
     #[arg(long)]
-    collapse_empty_passwords: bool,
+    keep_empty_password_stubs: bool,
 }
 
 fn main() -> ExitCode {
@@ -134,7 +134,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let config = DedupConfig {
         split_divergent_totps: cli.split_divergent_totps,
-        collapse_empty_passwords: cli.collapse_empty_passwords,
+        keep_empty_password_stubs: cli.keep_empty_password_stubs,
     };
     let stats = merge_icloud_csv_into_export_with_config(&mut export, &csv_text, &config)?;
 
@@ -165,7 +165,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "trashed_sidecar": trashed_sidecar,
         "trashed_sidecar_item_count": trashed_count,
         "split_divergent_totps": config.split_divergent_totps,
-        "collapse_empty_passwords": config.collapse_empty_passwords,
+        "keep_empty_password_stubs": config.keep_empty_password_stubs,
         "csv_rows_total": stats.csv_rows,
         "csv_rows_appended": stats.csv_items_appended,
         "csv_rows_skipped_empty": stats.csv_rows_skipped,

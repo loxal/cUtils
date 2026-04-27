@@ -145,12 +145,12 @@ Items that are **never** grouped (passed through byte-identical):
 
 - items with `reprompt == 1` (master-password gated — too sensitive to
   auto-merge)
-- items with an empty password (would spuriously group on `""`) —
-  unless `--collapse-empty-passwords` is set, in which case
-  empty-password stubs run through a [second dedup pass](#empty-password-dedup-pass-opt-in)
-  that requires at least one of `{username, URI hostname, fido2}` to
-  match. Items with no identifying signal beyond their name are still
-  passed through untouched.
+- items with an empty password whose **only** identifying signal is
+  their name (no username, no URI host, no fido2 credential). The
+  [empty-password dedup pass](#empty-password-dedup-pass) runs by
+  default and groups credential-less stubs that share at least one
+  of `{username, URI hostname, fido2}`; pass `--keep-empty-password-stubs`
+  if you'd rather inspect every stub by hand.
 - items whose name already contains `[duplicate]`
 - already-trashed items (their `deletedDate` is preserved as-is)
 
@@ -301,14 +301,15 @@ just dedup-split-totps                             # plain dedup
 just merge-with-icloud-credentials-csv-split-totps # iCloud merge
 ```
 
-### Empty-password dedup pass (opt-in)
+### Empty-password dedup pass
 
-Pass `--collapse-empty-passwords` (or run
-`just dedup-collapse-empty-passwords`) to enable a second dedup pass
-that targets the credential-less stubs the strict pass deliberately
-skips. These items typically come from browser auto-save loops where
-the same domain gets saved repeatedly without a password, leaving 10–30
-identical entries.
+Runs by default. Targets credential-less stubs the strict pass
+deliberately skips — items with an empty `login.password`, typically
+from browser auto-save loops where the same domain gets saved
+repeatedly without a password, leaving 10–30 identical entries. To
+preserve the older conservative behavior (every stub stays as a
+separate living item), pass `--keep-empty-password-stubs` or run
+`just dedup-keep-empty-password-stubs`.
 
 The pass requires **all** of the following to match before collapsing:
 
@@ -367,13 +368,14 @@ every loser fully, so any false positive is recoverable. The audit
 JSON additionally surfaces a `"empty_password_groups_by_signal":
 {"fido2": F, "host": H, "username_only": U}` summary at the top level.
 
-> Tradeoff: the pass deliberately under-skipped items that look like
-> the same account but happen to be unfilled (e.g. you started typing
-> the password but didn't save). With the flag set, those collapse
-> together; the loser's URIs, notes, custom fields, and password
+> Tradeoff: the pass collapses items that look like the same account
+> but happen to be unfilled (e.g. you started typing the password but
+> didn't save). The loser's URIs, notes, custom fields, and password
 > history all union onto the survivor, so nothing the user typed is
-> lost. If you would rather hand-reconcile such groups, leave the
-> flag off — current behavior is unchanged.
+> lost. If you would rather hand-reconcile such groups, pass
+> `--keep-empty-password-stubs` (or run
+> `just dedup-keep-empty-password-stubs`) — every stub then survives
+> as its own living item.
 
 ### A note on the note-body heuristic
 

@@ -3,9 +3,10 @@
 //! **"Which item survives, and what's the audit trail?"** — pipeline
 //! orchestration.
 //!
-//! The dedup pipeline runs in seven passes (the empty-password login
-//! pass is opt-in via [`DedupConfig::collapse_empty_passwords`]; the
-//! other six run by default):
+//! The dedup pipeline runs in seven passes by default (the
+//! empty-password login pass can be skipped via
+//! [`DedupConfig::keep_empty_password_stubs`] for the rare reviewer
+//! workflow that wants hand-inspection of every credential-less stub):
 //!
 //! 1. **Strict login dedup** — group items by [`crate::key::dedup_key`];
 //!    skip items that fail [`crate::key::skip_from_dedup`]. For each
@@ -15,10 +16,12 @@
 //!    it, and mark the losers with `deletedDate = now`. Losers stay
 //!    in the output array so they surface in Bitwarden's **Trash**
 //!    folder after import — no item is ever removed.
-//! 2. **Empty-password login dedup** (opt-in) — same shape as Pass 1
-//!    but keyed by [`crate::key::empty_password_dedup_key`] over items
-//!    the strict pass skipped because their `login.password` was empty.
-//!    Refuses to group items whose only signal is the display name.
+//! 2. **Empty-password login dedup** (default-on; opt-out via
+//!    [`DedupConfig::keep_empty_password_stubs`]) — same shape as
+//!    Pass 1 but keyed by [`crate::key::empty_password_dedup_key`]
+//!    over items the strict pass skipped because their
+//!    `login.password` was empty. Refuses to group items whose only
+//!    signal is the display name.
 //! 3. **Secure-note dedup** — group `type: 2` items by
 //!    [`crate::key::secure_note_key`] (name + org + canonicalized
 //!    body), collapse literal duplicates only.
@@ -82,24 +85,29 @@ pub struct DedupConfig {
     /// having the wrong live secret on the living survivor.
     pub split_divergent_totps: bool,
 
-    /// When `true`, run a second login-dedup pass over credential-less
-    /// stubs (empty `login.password`) that the strict pass deliberately
-    /// skips. Items only group when name + organization + username +
-    /// URI host set + fido2 signature all match AND the group has at
-    /// least one identifying signal beyond its name (non-empty
-    /// username, non-empty URI host set, or a fido2 credential).
+    /// When `true`, **skip** the empty-password login dedup pass and
+    /// leave credential-less stubs (empty `login.password`) as
+    /// separate living items. The default (`false`) runs the pass:
+    /// items group when name + organization + username + URI host set
+    /// + fido2 signature all match AND the group has at least one
+    /// identifying signal beyond its name.
     ///
-    /// Off by default because empty-password stubs can occasionally
-    /// represent distinct real-world accounts the user has not yet
-    /// filled in. Losers route to the trash sidecar like every other
-    /// dedup loser, so any false positive is recoverable.
-    pub collapse_empty_passwords: bool,
+    /// Default-on because real-vault validation showed every observed
+    /// empty-password cluster is genuinely the same account (browser
+    /// auto-save loops). Set to `true` if you have a vault where
+    /// distinct unfilled accounts share usernames and you want to
+    /// reconcile them by hand. Losers from the default pass route to
+    /// the trash sidecar, so any false positive on a normal vault is
+    /// recoverable; this opt-out is for the edge case where a
+    /// reviewer wants to inspect every stub before any merge.
+    pub keep_empty_password_stubs: bool,
 }
 
-/// Which signal qualified an empty-password item for grouping in
-/// [`DedupConfig::collapse_empty_passwords`]. Listed in least-to-most
-/// corroborated order so a reviewer sorting by `signal_kind` sees the
-/// riskier groups first.
+/// Which signal qualified an empty-password item for grouping in the
+/// empty-password dedup pass (toggled off via
+/// [`DedupConfig::keep_empty_password_stubs`]). Listed in
+/// least-to-most corroborated order so a reviewer sorting by
+/// `signal_kind` sees the riskier groups first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalKind {
@@ -151,9 +159,8 @@ impl SignalKind {
 /// - `skipped`  — items the **strict login pass** declined to group:
 ///                non-logins, reprompt-gated, empty password,
 ///                already tagged `[duplicate]`, already-deleted
-///                items in the input. **Note**: when
-///                `collapse_empty_passwords` is set, some items
-///                counted here may still be grouped by the
+///                items in the input. **Note**: by default some
+///                items counted here are still grouped by the
 ///                empty-password pass — `skipped` is
 ///                strict-pass-local, not "skipped by every pass".
 ///                Audit JSON publishes this as `strict_pass_skipped`.
@@ -185,8 +192,8 @@ pub struct DedupStats {
     pub groups: usize,
     /// Strict login pass (non-empty password, [`crate::key::dedup_key`]).
     pub strict_login_groups: usize,
-    /// Empty-password login pass — non-zero only when
-    /// [`DedupConfig::collapse_empty_passwords`] is set.
+    /// Empty-password login pass — runs by default; zero only when
+    /// [`DedupConfig::keep_empty_password_stubs`] is set.
     pub empty_password_groups: usize,
     /// Items routed to trash by the empty-password pass specifically.
     pub empty_password_trashed: usize,
@@ -504,6 +511,7 @@ pub(crate) fn dedup_items_with_folders(
         let collections_merged_count = patch.collection_additions.len();
         let folder_note_added = patch.folder_note_line.is_some();
         let notes_merged_flag = patch.notes_merged;
+        let notes_truncated_flag = patch.notes_truncated;
 
         for &di in drop_idxs {
             to_drop.insert(di);
@@ -530,6 +538,7 @@ pub(crate) fn dedup_items_with_folders(
                 "totp_conflict": totp_conflict,
                 "totp_kept_from_id": totp_kept_from_id.clone(),
                 "notes_merged": notes_merged_flag,
+                "notes_truncated": notes_truncated_flag,
                 "fields_merged": fields_merged_count,
                 "collections_merged": collections_merged_count,
                 "folder_note_added": folder_note_added,
@@ -557,16 +566,18 @@ pub(crate) fn dedup_items_with_folders(
         }
     }
 
-    // Pass 2: empty-password login dedup (opt-in). Runs AFTER the
-    // strict pass has already marked its losers with `deletedDate`,
-    // and `is_dedupable_empty_password_login` filters those out — so
-    // a strict-pass loser is never re-considered, and this pass only
-    // touches items the strict pass left alone (skipped because of
-    // empty pw).
-    let epw_outcome = if config.collapse_empty_passwords {
-        dedup_empty_password_logins(items, folders, &now, config)
-    } else {
+    // Pass 2: empty-password login dedup. Runs by default; set
+    // `keep_empty_password_stubs` to skip it (rare opt-out for
+    // reviewers who want to hand-inspect every credential-less
+    // stub). Runs AFTER the strict pass has already marked its
+    // losers with `deletedDate`, and `is_dedupable_empty_password_login`
+    // filters those out — so a strict-pass loser is never
+    // re-considered, and this pass only touches items the strict
+    // pass left alone (skipped because of empty pw).
+    let epw_outcome = if config.keep_empty_password_stubs {
         EmptyPasswordOutcome::default()
+    } else {
+        dedup_empty_password_logins(items, folders, &now, config)
     };
 
     // Pass 3: secure-note dedup.
@@ -742,6 +753,7 @@ fn dedup_empty_password_logins(
         let collections_merged_count = patch.collection_additions.len();
         let folder_note_added = patch.folder_note_line.is_some();
         let notes_merged_flag = patch.notes_merged;
+        let notes_truncated_flag = patch.notes_truncated;
 
         for &di in drop_idxs {
             to_drop.insert(di);
@@ -769,6 +781,7 @@ fn dedup_empty_password_logins(
                 "totp_conflict": totp_conflict,
                 "totp_kept_from_id": totp_kept_from_id.clone(),
                 "notes_merged": notes_merged_flag,
+                "notes_truncated": notes_truncated_flag,
                 "fields_merged": fields_merged_count,
                 "collections_merged": collections_merged_count,
                 "folder_note_added": folder_note_added,
@@ -1297,21 +1310,23 @@ mod tests {
     }
 
     #[test]
-    fn epw_off_by_default_three_identical_stay_living() {
+    fn epw_three_identical_collapse_by_default() {
+        // Default config now runs the empty-password pass.
         let mut items = vec![
             epw_login("Acme", "u", Some("https://acme.com/")),
             epw_login("Acme", "u", Some("https://acme.com/")),
             epw_login("Acme", "u", Some("https://acme.com/")),
         ];
         let stats = dedup_items(&mut items);
-        assert_eq!(stats.empty_password_groups, 0);
-        assert_eq!(stats.empty_password_trashed, 0);
-        assert_eq!(stats.living, 3);
-        assert_eq!(stats.trashed, 0);
+        assert_eq!(stats.empty_password_groups, 1);
+        assert_eq!(stats.empty_password_trashed, 2);
+        assert_eq!(stats.living, 1);
+        assert_eq!(stats.output, 3);
     }
 
     #[test]
-    fn epw_three_identical_collapse_when_flag_on() {
+    fn epw_keep_empty_password_stubs_opts_out_of_pass() {
+        // The opt-out flag preserves the older conservative behavior.
         let mut items = vec![
             epw_login("Acme", "u", Some("https://acme.com/")),
             epw_login("Acme", "u", Some("https://acme.com/")),
@@ -1320,14 +1335,14 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
+                keep_empty_password_stubs: true,
                 ..Default::default()
             },
         );
-        assert_eq!(stats.empty_password_groups, 1);
-        assert_eq!(stats.empty_password_trashed, 2);
-        assert_eq!(stats.living, 1);
-        assert_eq!(stats.output, 3);
+        assert_eq!(stats.empty_password_groups, 0);
+        assert_eq!(stats.empty_password_trashed, 0);
+        assert_eq!(stats.living, 3);
+        assert_eq!(stats.trashed, 0);
     }
 
     #[test]
@@ -1340,7 +1355,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1366,7 +1380,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1390,7 +1403,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1414,7 +1426,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1435,7 +1446,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1455,7 +1465,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1473,7 +1482,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1493,7 +1501,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1516,7 +1523,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1546,8 +1552,8 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 split_divergent_totps: true,
+                ..Default::default()
             },
         );
         assert_eq!(stats.empty_password_groups, 0);
@@ -1569,7 +1575,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );
@@ -1607,7 +1612,6 @@ mod tests {
         let stats = dedup_items_with_config(
             &mut items,
             &DedupConfig {
-                collapse_empty_passwords: true,
                 ..Default::default()
             },
         );

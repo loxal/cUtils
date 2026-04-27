@@ -51,15 +51,14 @@ struct Cli {
     #[arg(long)]
     split_divergent_totps: bool,
 
-    /// Run a second login-dedup pass over credential-less stubs (empty
-    /// `login.password`) that the strict pass deliberately skips. Items
-    /// only group when name + organization + username + URI host set +
-    /// fido2 signature all match AND the group has at least one
-    /// identifying signal beyond its name (non-empty username, non-empty
-    /// URI host set, or a fido2 credential). Losers route to the trash
-    /// sidecar like every other dedup loser. Off by default.
+    /// **Skip** the empty-password login dedup pass — leave
+    /// credential-less stubs (empty `login.password`) as separate
+    /// living items rather than collapsing them on
+    /// name+organization+username+URI-host+fido2. The default is to
+    /// run that pass; pass this flag for the rare reviewer workflow
+    /// where you want to hand-inspect every stub before any merge.
     #[arg(long)]
-    collapse_empty_passwords: bool,
+    keep_empty_password_stubs: bool,
 }
 
 fn main() -> ExitCode {
@@ -110,7 +109,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // error instead of a plausible-looking no-op output.
     let config = DedupConfig {
         split_divergent_totps: cli.split_divergent_totps,
-        collapse_empty_passwords: cli.collapse_empty_passwords,
+        keep_empty_password_stubs: cli.keep_empty_password_stubs,
     };
     let stats = dedup_export_with_config(&mut data, &config)?;
 
@@ -138,7 +137,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "trashed_sidecar": trashed_sidecar,
         "trashed_sidecar_item_count": trashed_count,
         "split_divergent_totps": config.split_divergent_totps,
-        "collapse_empty_passwords": config.collapse_empty_passwords,
+        "keep_empty_password_stubs": config.keep_empty_password_stubs,
         "input_item_count": stats.total,
         "output_item_count": stats.output,
         "living_item_count": stats.living,
@@ -158,9 +157,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "folders_deduplicated": stats.folders_deduplicated,
         // Strict-pass-local skip count: items the strict login pass
         // declined to group (non-logins, reprompt-gated, empty
-        // password, `[duplicate]`-tagged, or already trashed). When
-        // `collapse_empty_passwords` is set, some items in this
-        // bucket may still be grouped by Pass 2 — read alongside
+        // password, `[duplicate]`-tagged, or already trashed). Some
+        // items in this bucket are then grouped by Pass 2
+        // (empty-password pass) by default — read alongside
         // `empty_password_groups` / `empty_password_trashed` for the
         // full picture.
         "strict_pass_skipped": stats.skipped,

@@ -30,6 +30,24 @@ use serde_json::Value;
 use crate::json_util::get_str;
 use crate::uris::uris_to_merge;
 
+/// Plaintext byte budget for the merged `notes` body on a surviving
+/// item. Bitwarden caps encrypted note ciphertext at 10 000
+/// characters per item — the import path errors with `field Notes
+/// exceeds the maximum encrypted value length of 10000 characters`
+/// when that ceiling is breached. After AES-CBC + HMAC + base64
+/// envelope, the expansion factor is ~4/3 plus ~64 bytes of
+/// IV/HMAC overhead, so the effective plaintext ceiling is ~7400
+/// bytes for ASCII and lower for UTF-8-heavy content. We pick 6800
+/// so non-ASCII vaults still fit comfortably within Bitwarden's
+/// limit even after worst-case multibyte expansion.
+const BITWARDEN_NOTES_PLAINTEXT_BUDGET: usize = 6800;
+
+/// Marker appended to a notes body that this tool truncated because
+/// the merge would otherwise exceed [`BITWARDEN_NOTES_PLAINTEXT_BUDGET`].
+/// Plaintext only — the trash sidecar still carries every loser
+/// item's full original notes for recovery.
+const NOTES_TRUNCATION_MARKER: &str = "\n---\n[bitwarden-dedup] notes truncated to fit Bitwarden's 10 000-character encrypted-field limit; full text recoverable from trash sidecar";
+
 /// All mutations that need to be applied to a surviving item once its
 /// duplicate group has been decided.
 pub(crate) struct SurvivorPatch {
@@ -48,6 +66,12 @@ pub(crate) struct SurvivorPatch {
     pub(crate) favorite: bool,
     /// Did any drop contribute a note body to the survivor?
     pub(crate) notes_merged: bool,
+    /// Did the merge truncate the assembled notes body to fit
+    /// Bitwarden's 10 000-character encrypted-field cap? Surfaced
+    /// in the audit so reviewers can find affected items; the full
+    /// text is always preserved on the loser entries in the trash
+    /// sidecar.
+    pub(crate) notes_truncated: bool,
 }
 
 /// Outcome of merging TOTP across a duplicate group.
@@ -95,6 +119,24 @@ pub(crate) fn build_survivor_patch(
     let notes_merged = match &notes {
         Some(body) => body.trim() != keep_note,
         None => false,
+    };
+
+    // 2.b. Cap merged notes plaintext below Bitwarden's 10 000-char
+    // encrypted-field limit. Only truncates when our merge actually
+    // grew the notes — single-item items pass through with their
+    // original notes intact, even if those already exceed the cap
+    // (in which case import will fail noisily on that one item, and
+    // the user fixes it in the source vault rather than us silently
+    // mangling untouched user data). The full text from every
+    // dropped item is still preserved in the trash sidecar.
+    let folder_line_overhead = folder_line_overhead_chars(keep, drops, folders);
+    let (notes, notes_truncated) = match notes {
+        Some(body) if notes_merged => {
+            let (truncated_body, was_truncated) =
+                truncate_notes_to_budget(body, folder_line_overhead);
+            (Some(truncated_body), was_truncated)
+        }
+        n => (n, false),
     };
 
     // 3. URIs: adds (uri, match_mode) pairs missing on keep.
@@ -145,7 +187,80 @@ pub(crate) fn build_survivor_patch(
         totp,
         favorite,
         notes_merged,
+        notes_truncated,
     }
+}
+
+/// Pre-compute how many bytes the folder-disambiguation line will
+/// add to the assembled notes body, so [`truncate_notes_to_budget`]
+/// can reserve headroom for it. Returns `0` when no folder note
+/// will be prepended.
+fn folder_line_overhead_chars(
+    keep: &Value,
+    drops: &[&Value],
+    folders: &HashMap<String, String>,
+) -> usize {
+    folder_disambiguation_note(keep, drops, folders)
+        .as_deref()
+        .map(|line| line.len() + 1) // +1 for the joining "\n"
+        .unwrap_or(0)
+}
+
+/// Truncate `body` so that the final assembled notes (folder line +
+/// `body`) fits within [`BITWARDEN_NOTES_PLAINTEXT_BUDGET`]. Cuts at
+/// the last `\n---\n` separator that fits to keep the surviving
+/// note bodies whole; if no separator fits, falls back to a
+/// UTF-8-safe character-boundary cut. Appends
+/// [`NOTES_TRUNCATION_MARKER`] so the operator sees in the imported
+/// item that material was elided. Returns `(body, was_truncated)`.
+fn truncate_notes_to_budget(body: String, folder_overhead: usize) -> (String, bool) {
+    // Reserve room for the truncation marker AND the folder line so
+    // the final assembled string stays within budget.
+    let marker_len = NOTES_TRUNCATION_MARKER.len();
+    let total_budget = BITWARDEN_NOTES_PLAINTEXT_BUDGET;
+    if body.len() + folder_overhead <= total_budget {
+        return (body, false);
+    }
+    // Headroom for the body proper.
+    let body_budget = total_budget
+        .saturating_sub(folder_overhead)
+        .saturating_sub(marker_len);
+    if body_budget == 0 {
+        // Pathological: no room at all. Replace body with marker
+        // alone so the survivor at least carries the explanation.
+        return (NOTES_TRUNCATION_MARKER.trim_start().to_string(), true);
+    }
+
+    let separator = "\n---\n";
+    let mut best_cut: Option<usize> = None;
+    let mut search_from = 0;
+    while let Some(rel) = body[search_from..].find(separator) {
+        let abs = search_from + rel;
+        if abs <= body_budget {
+            best_cut = Some(abs);
+            search_from = abs + separator.len();
+        } else {
+            break;
+        }
+    }
+
+    let prefix: &str = match best_cut {
+        Some(cut) => &body[..cut],
+        None => {
+            // No separator boundary fits. Truncate at a UTF-8-safe
+            // character boundary at or below the body budget.
+            let mut cut = body_budget.min(body.len());
+            while cut > 0 && !body.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            &body[..cut]
+        }
+    };
+
+    let mut out = String::with_capacity(prefix.len() + marker_len);
+    out.push_str(prefix);
+    out.push_str(NOTES_TRUNCATION_MARKER);
+    (out, true)
 }
 
 pub(crate) fn apply_survivor_patch(item: &mut Value, patch: SurvivorPatch) {
@@ -647,6 +762,162 @@ fn field_key(entry: &Value) -> (String, String, i64, i64) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn truncate_notes_below_budget_no_op() {
+        let body = "short note".to_string();
+        let (out, was) = truncate_notes_to_budget(body.clone(), 0);
+        assert_eq!(out, body);
+        assert!(!was);
+    }
+
+    #[test]
+    fn truncate_notes_cuts_at_separator_boundary() {
+        // Build a body with multiple sections separated by `\n---\n`.
+        // The total exceeds the budget; the cut must land at the
+        // last separator that keeps the prefix within the body
+        // budget so individual sections stay whole.
+        let section_a = "A".repeat(2000);
+        let section_b = "B".repeat(2000);
+        let section_c = "C".repeat(3000); // pushes total over budget
+        let body = format!("{section_a}\n---\n{section_b}\n---\n{section_c}");
+        // body length = 2000 + 5 + 2000 + 5 + 3000 = 7010, > BUDGET 6800
+        let (out, was) = truncate_notes_to_budget(body, 0);
+        assert!(was, "should have truncated");
+        // The cut must land at the second separator (after section_b),
+        // because keeping section_c would exceed BUDGET. Only A + B
+        // remain plus the truncation marker.
+        assert!(out.contains(&section_a));
+        assert!(out.contains(&section_b));
+        assert!(!out.contains(&section_c[..]));
+        assert!(
+            out.ends_with(NOTES_TRUNCATION_MARKER),
+            "marker must be appended"
+        );
+        assert!(
+            out.len() <= BITWARDEN_NOTES_PLAINTEXT_BUDGET,
+            "truncated body must fit budget; got {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn truncate_notes_falls_back_to_char_boundary_when_no_separator_fits() {
+        // A single huge section with no `\n---\n` separators. The
+        // truncation must still happen (Bitwarden import would
+        // otherwise fail); the cut falls back to a character
+        // boundary at the body budget.
+        let body = "x".repeat(20_000);
+        let (out, was) = truncate_notes_to_budget(body, 0);
+        assert!(was);
+        assert!(out.ends_with(NOTES_TRUNCATION_MARKER));
+        assert!(out.len() <= BITWARDEN_NOTES_PLAINTEXT_BUDGET);
+    }
+
+    #[test]
+    fn truncate_notes_respects_folder_line_overhead() {
+        // Folder-disambiguation line consumes budget. A body that
+        // would fit alone may need truncation when folder line is
+        // prepended.
+        let body_size = BITWARDEN_NOTES_PLAINTEXT_BUDGET - 100;
+        let body = "y".repeat(body_size);
+        // No folder line: body fits.
+        let (_out_no_folder, truncated_no_folder) = truncate_notes_to_budget(body.clone(), 0);
+        assert!(!truncated_no_folder);
+        // Big folder line: body must truncate to make room.
+        let (_out_big_folder, truncated_big_folder) = truncate_notes_to_budget(body, 500);
+        assert!(
+            truncated_big_folder,
+            "big folder-line overhead should trigger truncation"
+        );
+    }
+
+    #[test]
+    fn truncate_notes_handles_utf8_safely() {
+        // Multibyte characters at the truncation boundary must not
+        // produce invalid UTF-8.
+        let prefix = "a".repeat(BITWARDEN_NOTES_PLAINTEXT_BUDGET - 1000);
+        // Mix in a 4-byte char that straddles the cutoff
+        let body = format!("{prefix}{}", "é".repeat(2000));
+        let (out, was) = truncate_notes_to_budget(body, 0);
+        assert!(was);
+        // Should be valid UTF-8; constructing a String already
+        // requires this, but the assertion documents the intent.
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn build_survivor_patch_truncates_oversize_merged_notes() {
+        // Regression for the wx.network case: 4 dropped items each
+        // carrying ~2500 chars of distinct notes blow past
+        // Bitwarden's 10 000-char cipher limit when unioned. The
+        // patch's `notes` body must be capped and `notes_truncated`
+        // surfaced.
+        let big = |c: char| -> String { std::iter::repeat(c).take(2500).collect() };
+        let keep = json!({
+            "type": 1,
+            "name": "wx.network",
+            "notes": big('A'),
+            "login": {"username": "u", "password": "p"}
+        });
+        let drop_b = json!({
+            "type": 1, "name": "wx.network",
+            "notes": big('B'),
+            "login": {"username": "u", "password": "p"}
+        });
+        let drop_c = json!({
+            "type": 1, "name": "wx.network",
+            "notes": big('C'),
+            "login": {"username": "u", "password": "p"}
+        });
+        let drop_d = json!({
+            "type": 1, "name": "wx.network",
+            "notes": big('D'),
+            "login": {"username": "u", "password": "p"}
+        });
+        let drops = [&drop_b, &drop_c, &drop_d];
+        let patch = build_survivor_patch(&keep, &drops, &HashMap::new());
+        let body = patch.notes.expect("notes body must be set");
+        assert!(
+            body.len() <= BITWARDEN_NOTES_PLAINTEXT_BUDGET,
+            "merged body must fit budget; got {} chars",
+            body.len()
+        );
+        assert!(patch.notes_truncated, "truncation flag must be set");
+        assert!(
+            body.ends_with(NOTES_TRUNCATION_MARKER),
+            "marker must be appended"
+        );
+        assert!(patch.notes_merged, "notes_merged must still be true");
+    }
+
+    #[test]
+    fn build_survivor_patch_does_not_truncate_unmerged_oversize_notes() {
+        // If the survivor's pre-existing notes already exceed the
+        // budget but no merge occurs (no drops contribute distinct
+        // notes), we must NOT silently mangle the user's data —
+        // their oversized notes pass through and import will fail
+        // noisily on that one item.
+        let huge = "x".repeat(BITWARDEN_NOTES_PLAINTEXT_BUDGET + 5000);
+        let keep = json!({
+            "type": 1, "name": "Single",
+            "notes": huge.clone(),
+            "login": {"username": "u", "password": "p"}
+        });
+        // Drop is identical → merge produces no new note text.
+        let drop_a = json!({
+            "type": 1, "name": "Single",
+            "notes": huge.clone(),
+            "login": {"username": "u", "password": "p"}
+        });
+        let patch = build_survivor_patch(&keep, &[&drop_a], &HashMap::new());
+        assert!(!patch.notes_merged, "no new note content was contributed");
+        assert!(!patch.notes_truncated, "must not truncate user data when no merge happened");
+        // The body is whatever merge_notes returned — should be the
+        // full original text.
+        let body = patch.notes.expect("notes body");
+        assert_eq!(body.len(), huge.len());
+    }
 
     #[test]
     fn merge_notes_preserves_leading_trailing_whitespace_of_survivor() {

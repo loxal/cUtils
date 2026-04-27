@@ -1,11 +1,15 @@
 // Copyright 2026 Alexander Orlov <alexander.orlov@loxal.net>
 
-//! Integration coverage for `--collapse-empty-passwords` flowing
-//! through both the `bitwarden-dedup` library API and the
+//! Integration coverage for the empty-password login dedup pass
+//! flowing through both the `bitwarden-dedup` library API and the
 //! `bitwarden-merge-icloud` library API. The two binaries each build
 //! their own audit JSON literal and stdout summary, so the spec
 //! asked for tests that exercise the full configured-merge path
 //! (not just the strict-pass library entry points).
+//!
+//! The pass runs by default; `DedupConfig::keep_empty_password_stubs`
+//! is the opt-out for the rare reviewer workflow that wants
+//! hand-inspection of every credential-less stub.
 
 use bitwarden_dedup::{
     DedupConfig, dedup_export_with_config, merge_icloud_csv_into_export_with_config,
@@ -32,9 +36,9 @@ fn empty_pw_login(id: &str, name: &str, user: &str, uri: Option<&str>) -> Value 
 }
 
 #[test]
-fn dedup_export_collapse_empty_passwords_trashes_loser() {
-    // End-to-end: the public dedup_export entry point honors
-    // `collapse_empty_passwords` and routes the loser to trash.
+fn dedup_export_collapses_empty_password_stubs_by_default() {
+    // End-to-end: the public dedup_export entry point runs the
+    // empty-password pass by default and routes the loser to trash.
     let mut export = json!({
         "folders": [],
         "items": [
@@ -42,14 +46,8 @@ fn dedup_export_collapse_empty_passwords_trashes_loser() {
             empty_pw_login("b", "Acme", "u", Some("https://acme.com/")),
         ]
     });
-    let stats = dedup_export_with_config(
-        &mut export,
-        &DedupConfig {
-            collapse_empty_passwords: true,
-            ..Default::default()
-        },
-    )
-    .expect("export shape valid");
+    let stats = dedup_export_with_config(&mut export, &DedupConfig::default())
+        .expect("export shape valid");
     assert_eq!(stats.empty_password_groups, 1);
     assert_eq!(stats.empty_password_trashed, 1);
     assert_eq!(stats.living, 1);
@@ -69,10 +67,9 @@ fn dedup_export_collapse_empty_passwords_trashes_loser() {
 }
 
 #[test]
-fn dedup_export_collapse_empty_passwords_off_by_default() {
-    // Regression guard at the public entry point: omitting the flag
-    // (default config) preserves the prior behavior — empty-pw items
-    // pass through.
+fn dedup_export_keep_empty_password_stubs_opts_out() {
+    // The opt-out flag preserves the older conservative behavior:
+    // empty-password stubs pass through as separate living items.
     let mut export = json!({
         "folders": [],
         "items": [
@@ -80,20 +77,26 @@ fn dedup_export_collapse_empty_passwords_off_by_default() {
             empty_pw_login("b", "Acme", "u", Some("https://acme.com/")),
         ]
     });
-    let stats = dedup_export_with_config(&mut export, &DedupConfig::default())
-        .expect("export shape valid");
+    let stats = dedup_export_with_config(
+        &mut export,
+        &DedupConfig {
+            keep_empty_password_stubs: true,
+            ..Default::default()
+        },
+    )
+    .expect("export shape valid");
     assert_eq!(stats.empty_password_groups, 0);
     assert_eq!(stats.empty_password_trashed, 0);
     assert_eq!(stats.living, 2);
 }
 
 #[test]
-fn icloud_merge_collapse_empty_passwords_collapses_csv_overlap() {
-    // The flag must flow all the way through
-    // `merge_icloud_csv_into_export_with_config` to the shared dedup
-    // pipeline — earlier code paths run unmodified, so this test is
-    // the contract that breaks if someone forgets to thread the
-    // config through a future refactor.
+fn icloud_merge_collapses_csv_overlap_by_default() {
+    // The empty-password pass must run all the way through
+    // `merge_icloud_csv_into_export_with_config` — earlier code
+    // paths run unmodified, so this test is the contract that
+    // breaks if someone forgets to thread the config through a
+    // future refactor.
     //
     // Setup: existing Bitwarden side has one empty-pw stub for
     // `acme.com`; CSV has another row that materializes as an
@@ -113,21 +116,15 @@ fn icloud_merge_collapse_empty_passwords_collapses_csv_overlap() {
     let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
                Acme,https://acme.com/,u@example.test,,,\n";
 
-    let stats = merge_icloud_csv_into_export_with_config(
-        &mut export,
-        csv,
-        &DedupConfig {
-            collapse_empty_passwords: true,
-            ..Default::default()
-        },
-    )
-    .expect("merge succeeds");
+    let stats =
+        merge_icloud_csv_into_export_with_config(&mut export, csv, &DedupConfig::default())
+            .expect("merge succeeds");
 
     assert_eq!(stats.csv_rows, 1);
     assert_eq!(stats.csv_items_appended, 1);
     assert_eq!(
         stats.dedup_stats.empty_password_groups, 1,
-        "the CSV-origin empty-pw stub must collapse with the existing Bitwarden stub"
+        "the CSV-origin empty-pw stub must collapse with the existing Bitwarden stub by default"
     );
     assert_eq!(stats.dedup_stats.empty_password_trashed, 1);
     assert_eq!(
@@ -135,7 +132,7 @@ fn icloud_merge_collapse_empty_passwords_collapses_csv_overlap() {
         "exactly one survivor remains living"
     );
 
-    // Audit-entry contract: the new pass labels its drops with the
+    // Audit-entry contract: the pass labels its drops with the
     // expected `item_kind` / `signal_kind` so downstream tooling can
     // grep them.
     let entries = &stats.dedup_stats.audit_entries;
@@ -151,10 +148,11 @@ fn icloud_merge_collapse_empty_passwords_collapses_csv_overlap() {
 }
 
 #[test]
-fn icloud_merge_off_by_default_preserves_csv_overlap() {
-    // Without the flag, the same setup keeps both items as living —
-    // the strict pass would skip them (empty pw) and there is no
-    // second pass to catch them. Confirms the default is conservative.
+fn icloud_merge_keep_empty_password_stubs_preserves_csv_overlap() {
+    // With the opt-out flag, both items stay as living — the strict
+    // pass skips them (empty pw) and the empty-password pass is
+    // disabled. Confirms the conservative behavior is still
+    // reachable.
     let mut export = json!({
         "folders": [],
         "items": [
@@ -168,14 +166,17 @@ fn icloud_merge_off_by_default_preserves_csv_overlap() {
     let stats = merge_icloud_csv_into_export_with_config(
         &mut export,
         csv,
-        &DedupConfig::default(),
+        &DedupConfig {
+            keep_empty_password_stubs: true,
+            ..Default::default()
+        },
     )
     .expect("merge succeeds");
 
     assert_eq!(stats.dedup_stats.empty_password_groups, 0);
     assert_eq!(
         stats.dedup_stats.living, 2,
-        "default config must NOT collapse empty-pw stubs across BW + CSV"
+        "opt-out must NOT collapse empty-pw stubs across BW + CSV"
     );
 }
 
@@ -204,14 +205,8 @@ fn dedup_stats_carries_per_pass_breakdown_for_audit_consumers() {
             json!({"id": "n2", "type": 2, "name": "Note", "notes": "body"}),
         ]
     });
-    let stats = dedup_export_with_config(
-        &mut export,
-        &DedupConfig {
-            collapse_empty_passwords: true,
-            ..Default::default()
-        },
-    )
-    .expect("export valid");
+    let stats = dedup_export_with_config(&mut export, &DedupConfig::default())
+        .expect("export valid");
 
     // Per-pass counts are what the binaries publish as audit fields.
     assert_eq!(stats.strict_login_groups, 1);

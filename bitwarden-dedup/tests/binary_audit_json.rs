@@ -45,9 +45,9 @@ fn cleanup(dir: &Path) {
 /// One duplicate of every dedupable type so the resulting audit
 /// JSON exercises every pass's counter in a single end-to-end run:
 /// strict-login pair, empty-password pair, card pair, identity
-/// pair. The empty-password pair only collapses when the binary is
-/// invoked with `--collapse-empty-passwords`; the others collapse
-/// by default.
+/// pair. All four collapse by default; the empty-password pair
+/// stays as separate items only when `--keep-empty-password-stubs`
+/// is passed.
 fn synthetic_export() -> Value {
     json!({
         "folders": [],
@@ -135,6 +135,9 @@ fn bitwarden_dedup_audit_json_has_all_documented_fields() {
 
     std::fs::write(&input, synthetic_export().to_string()).unwrap();
 
+    // Default invocation — empty-password pass runs without any
+    // explicit flag now. This test exercises the same end-to-end
+    // path an operator hits when they run `just dedup`.
     let result = Command::new(DEDUP_BIN)
         .arg("--input")
         .arg(&input)
@@ -142,7 +145,6 @@ fn bitwarden_dedup_audit_json_has_all_documented_fields() {
         .arg(&output)
         .arg("--audit")
         .arg(&audit)
-        .arg("--collapse-empty-passwords")
         .output()
         .expect("spawn bitwarden-dedup");
     assert!(
@@ -165,7 +167,7 @@ fn bitwarden_dedup_audit_json_has_all_documented_fields() {
         "trashed_sidecar",
         "trashed_sidecar_item_count",
         "split_divergent_totps",
-        "collapse_empty_passwords",
+        "keep_empty_password_stubs",
         "input_item_count",
         "output_item_count",
         "living_item_count",
@@ -208,7 +210,7 @@ fn bitwarden_dedup_audit_json_has_all_documented_fields() {
     assert_eq!(audit_doc["card_groups"], 1);
     assert_eq!(audit_doc["identity_groups"], 1);
     assert_eq!(audit_doc["duplicate_groups"], 4);
-    assert_eq!(audit_doc["collapse_empty_passwords"], true);
+    assert_eq!(audit_doc["keep_empty_password_stubs"], false);
     assert_eq!(audit_doc["empty_password_trashed"], 1);
     // Each duplicate pair contributes one trashed loser → 4 total.
     assert_eq!(audit_doc["trashed_count"], 4);
@@ -261,14 +263,15 @@ fn bitwarden_dedup_audit_json_has_all_documented_fields() {
 }
 
 #[test]
-fn bitwarden_dedup_audit_json_off_by_default_omits_empty_pw_collapse() {
-    // Without `--collapse-empty-passwords`, the per-pass counters
-    // for the empty-password pass must be zero AND the
-    // `collapse_empty_passwords` flag must serialize as `false`.
-    // Regression guard: the binary currently surfaces both, and a
-    // future refactor that flips the default would silently change
-    // this output.
-    let dir = scratch_dir("dedup-default");
+fn bitwarden_dedup_audit_json_keep_empty_password_stubs_opts_out() {
+    // With `--keep-empty-password-stubs`, the per-pass counters for
+    // the empty-password pass must be zero AND the
+    // `keep_empty_password_stubs` flag must serialize as `true`.
+    // The other passes (strict-login, card, identity) still run.
+    // Regression guard: a refactor that mis-wires the opt-out would
+    // either suppress those passes too (over-correcting) or fail to
+    // suppress the empty-pw pass (under-correcting).
+    let dir = scratch_dir("dedup-keep-stubs");
     let input = dir.join("vault.json");
     let output = dir.join("vault.dedup.json");
     let audit = dir.join("vault.audit.json");
@@ -284,17 +287,18 @@ fn bitwarden_dedup_audit_json_off_by_default_omits_empty_pw_collapse() {
             &output,
             Path::new("--audit"),
             &audit,
+            Path::new("--keep-empty-password-stubs"),
         ],
     );
     assert!(result.status.success());
 
     let audit_doc: Value = serde_json::from_str(&std::fs::read_to_string(&audit).unwrap()).unwrap();
-    assert_eq!(audit_doc["collapse_empty_passwords"], false);
+    assert_eq!(audit_doc["keep_empty_password_stubs"], true);
     assert_eq!(audit_doc["empty_password_groups"], 0);
     assert_eq!(audit_doc["empty_password_trashed"], 0);
-    // Card and identity passes still run by default (no opt-in flag),
-    // so they collapse their fixtures regardless. The empty-pw pair
-    // stays as 2 living items because the flag is off.
+    // Card and identity passes still run regardless of this flag,
+    // so they collapse their fixtures. The empty-pw pair stays as
+    // 2 living items because the opt-out is set.
     assert_eq!(audit_doc["card_groups"], 1);
     assert_eq!(audit_doc["identity_groups"], 1);
     // Living item arithmetic with this fixture (8 input items):
@@ -375,6 +379,8 @@ fn bitwarden_merge_icloud_audit_json_has_all_documented_fields() {
     )
     .unwrap();
 
+    // Default invocation — empty-password pass runs without an
+    // explicit flag.
     let result = Command::new(MERGE_BIN)
         .arg("--bitwarden")
         .arg(&bw_input)
@@ -384,7 +390,6 @@ fn bitwarden_merge_icloud_audit_json_has_all_documented_fields() {
         .arg(&output)
         .arg("--audit")
         .arg(&audit)
-        .arg("--collapse-empty-passwords")
         .output()
         .expect("spawn bitwarden-merge-icloud");
     assert!(
@@ -404,7 +409,7 @@ fn bitwarden_merge_icloud_audit_json_has_all_documented_fields() {
         "trashed_sidecar",
         "trashed_sidecar_item_count",
         "split_divergent_totps",
-        "collapse_empty_passwords",
+        "keep_empty_password_stubs",
         "csv_rows_total",
         "csv_rows_appended",
         "csv_rows_skipped_empty",
@@ -439,8 +444,9 @@ fn bitwarden_merge_icloud_audit_json_has_all_documented_fields() {
         );
     }
 
-    // CSV row collapsed against the existing Bitwarden stub.
-    assert_eq!(audit_doc["collapse_empty_passwords"], true);
+    // CSV row collapsed against the existing Bitwarden stub by
+    // default (the empty-password pass runs without the opt-out).
+    assert_eq!(audit_doc["keep_empty_password_stubs"], false);
     assert_eq!(audit_doc["csv_rows_total"], 1);
     assert_eq!(audit_doc["csv_rows_appended"], 1);
     assert_eq!(audit_doc["empty_password_groups"], 1);
