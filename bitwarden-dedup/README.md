@@ -742,6 +742,21 @@ What the redactor preserves (structural metadata needed for schema
 fidelity): `type`, `reprompt`, `favorite`, URI counts per item, URI match
 modes, and custom field counts + types.
 
+## Support
+
+If `bitwarden-dedup` saved you an evening of manual cleanup, rescued a vault
+from runaway duplicates, or replaced a fragile spreadsheet workflow, a
+one-time **$1–2** tip is the realistic value of an hour of someone else's
+tooling work — and a meaningful signal that this kind of careful, offline,
+secret-respecting CLI work is worth maintaining.
+
+→ [github.com/sponsors/loxal](https://github.com/sponsors/loxal)
+
+The binaries themselves stay free, offline, and nag-free: no telemetry, no
+upsell, no donate prompt at runtime. The link lives here in the README and
+nowhere else. Use it only if (and when) the tool actually pulled its weight
+for you.
+
 ## Privacy policy for this repository
 
 No committed file in this crate — including the README — may contain

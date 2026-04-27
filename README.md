@@ -32,3 +32,21 @@ Bidirectional converter between HURL and HAR formats.
 ## [bitwarden-dedup](bitwarden-dedup/)
 
 Rust CLI that deduplicates a Bitwarden JSON vault export into an import-ready file. Uses a strict dedup key (name + username + password + TOTP + FIDO2 credentials + notes + custom fields + favorite) and merges URIs from dropped items into the kept item so no login URL is ever lost. TOTP secrets and passkey data are preserved verbatim.
+
+## Support
+
+Each tool here exists because a real workflow needed it — long-form TTS that
+the consumer apps don't ship, Vertex AI generation without a half-baked SDK
+in the way, an audio pipeline that survives 10-hour batches, a Bitwarden
+dedup that doesn't lose your TOTP seeds. They all stay free, offline-first
+where possible, and free of telemetry, accounts, or upsell.
+
+If one of these saved you an evening of glue code, an API-quota detour, or a
+manual cleanup you were dreading, a one-time **$1–2** tip is the realistic
+hourly value of someone else's tooling work — and a clear signal that
+careful, narrow-scope CLIs are worth maintaining.
+
+→ [github.com/sponsors/loxal](https://github.com/sponsors/loxal)
+
+No nag screens, no runtime prompts, no "pro tier." The link lives here in
+the README. Use it only when the tool actually pulled its weight for you.
