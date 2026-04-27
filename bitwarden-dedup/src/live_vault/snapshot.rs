@@ -164,6 +164,18 @@ pub fn recoverable_snapshot_path(vault_dir: &Path) -> PathBuf {
     vault_dir.join(format!("bitwarden_decrypted-export_{ts}.json"))
 }
 
+/// Same as [`recoverable_snapshot_path`], but explicitly marked as
+/// including Trash. The suffix is intentionally excluded from the
+/// `just dedup` auto-discovery glob so forensic runs do not silently
+/// become the next import source.
+pub fn recoverable_with_trash_snapshot_path(vault_dir: &Path) -> PathBuf {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let ts = utc_yyyymmddhhmmss_ms(now.as_secs(), now.subsec_millis());
+    vault_dir.join(format!("bitwarden_decrypted-export_{ts}-with-trash.json"))
+}
+
 /// Write the forensic snapshot.
 ///
 /// `sync_body` is the raw `/api/sync` response — UTF-8 JSON. We
@@ -330,19 +342,23 @@ fn validate_recoverable_snapshot_path(path: &Path) -> Result<(), SnapshotError> 
     if !recoverable_filename_matches_pattern(name) {
         return Err(SnapshotError::InvalidPath {
             path: path.to_path_buf(),
-            reason: "filename must match `bitwarden_decrypted-export_<14|17 digits>.json`",
+            reason: "filename must match `bitwarden_decrypted-export_<14|17 digits>.json` \
+                    or `bitwarden_decrypted-export_<14|17 digits>-with-trash.json`",
         });
     }
     Ok(())
 }
 
 fn recoverable_filename_matches_pattern(name: &str) -> bool {
-    let Some(stem) = name
+    let Some(mut stem) = name
         .strip_prefix("bitwarden_decrypted-export_")
         .and_then(|s| s.strip_suffix(".json"))
     else {
         return false;
     };
+    if let Some(ts) = stem.strip_suffix("-with-trash") {
+        stem = ts;
+    }
     matches!(stem.len(), 14 | 17) && stem.chars().all(|c| c.is_ascii_digit())
 }
 
@@ -817,6 +833,23 @@ mod tests {
     }
 
     #[test]
+    fn write_recoverable_accepts_with_trash_suffix() {
+        let dir = scratch_vault_dir("rec-trash-suffix");
+        let path = dir.join("bitwarden_decrypted-export_20260425000000-with-trash.json");
+        let body = serde_json::json!({
+            "encrypted": false,
+            "items": [{"id": "a", "deletedDate": "2026-04-27T12:00:00Z"}],
+        });
+        let snap = write_recoverable(&path, &body).unwrap();
+        assert_eq!(snap.item_count, 1);
+        assert_eq!(
+            snap.path.file_name().and_then(|n| n.to_str()),
+            Some("bitwarden_decrypted-export_20260425000000-with-trash.json")
+        );
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
     #[cfg(unix)]
     fn write_recoverable_sets_0o600_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -879,6 +912,12 @@ mod tests {
         assert!(recoverable_filename_matches_pattern(
             "bitwarden_decrypted-export_20260425000000123.json"
         ));
+        assert!(recoverable_filename_matches_pattern(
+            "bitwarden_decrypted-export_20260425000000-with-trash.json"
+        ));
+        assert!(recoverable_filename_matches_pattern(
+            "bitwarden_decrypted-export_20260425000000123-with-trash.json"
+        ));
         // Wrong prefix: encrypted-export is the forensic snapshot.
         assert!(!recoverable_filename_matches_pattern(
             "bitwarden_encrypted-export_20260425000000.json"
@@ -892,6 +931,9 @@ mod tests {
         // Non-digit timestamp.
         assert!(!recoverable_filename_matches_pattern(
             "bitwarden_decrypted-export_abc.json"
+        ));
+        assert!(!recoverable_filename_matches_pattern(
+            "bitwarden_decrypted-export_20260425000000-trash.json"
         ));
     }
 

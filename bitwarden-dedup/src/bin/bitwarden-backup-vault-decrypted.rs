@@ -34,7 +34,9 @@ use bitwarden_dedup::live_vault::{
         decrypt_sync_to_export_shape, extract_account_email, filter_export_to_bw_export_items,
     },
     rest::{SyncError, fetch_prelogin, fetch_sync},
-    snapshot::{recoverable_snapshot_path, write_recoverable},
+    snapshot::{
+        recoverable_snapshot_path, recoverable_with_trash_snapshot_path, write_recoverable,
+    },
 };
 use clap::Parser;
 use secrecy::SecretString;
@@ -145,7 +147,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let path = recoverable_snapshot_path(vault_dir);
+    let path = if cli.include_trash {
+        recoverable_with_trash_snapshot_path(vault_dir)
+    } else {
+        recoverable_snapshot_path(vault_dir)
+    };
     let snap = write_recoverable(&path, &decrypted)?;
 
     println!();
@@ -162,6 +168,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "  state:     omitted {} trashed; preserved {} archived",
             filter_stats.trashed_omitted, filter_stats.archived_kept
         );
+    }
+    if cli.include_trash {
+        println!("  warning:   includes Trash; skipped by `just dedup` auto-discovery");
     }
     println!();
     println!("This file is **maximum-sensitivity plaintext** — passwords, TOTP seeds,");

@@ -1,13 +1,14 @@
 // Copyright 2026 Alexander Orlov <alexander.orlov@loxal.net>
 
-//! `bitwarden-backup-vault-decrypted-via-bw-cli` — decrypted active-vault
-//! backup through the official Bitwarden CLI.
+//! `bitwarden-backup-vault-decrypted-via-bw-cli` — decrypted vault backup
+//! through the official Bitwarden CLI's own export command.
 //!
-//! This is the conservative fallback/source-of-truth path: shell out to
-//! `bw sync --force`, `bw list folders`, and `bw list items`. It requires
-//! an unlocked official CLI session (`BW_SESSION`) and therefore matches
-//! the same default item state that `bw list items` exposes: not deleted,
-//! not archived.
+//! This is the conservative cross-check path for `bitwarden-backup-vault-decrypted`:
+//! shell out to `bw sync --force` and `bw --raw export --format json`. It
+//! requires an unlocked official CLI session (`BW_SESSION`) and produces
+//! the canonical `bw export` output — Trash filtered, Archive preserved,
+//! identical to what the direct-REST sibling emits when both tools see the
+//! same server state.
 
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -20,9 +21,10 @@ use serde_json::{Value, json};
 #[derive(Parser, Debug)]
 #[command(
     name = "bitwarden-backup-vault-decrypted-via-bw-cli",
-    about = "Decrypted active-vault backup through the official Bitwarden CLI. \
+    about = "Decrypted vault backup through `bw --raw export --format json`. \
              Requires an unlocked `bw` session and writes a `just dedup`-ready \
-             JSON file to vault/bitwarden_decrypted-export_<UTC-ts>.json."
+             JSON file to vault/bitwarden_decrypted-export_<UTC-ts>.json. \
+             Matches `bw export` semantics: Trash filtered, Archive preserved."
 )]
 struct Cli {
     /// Skip `bw sync --force` before listing items. Useful only when
@@ -75,14 +77,31 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    eprintln!("Reading folders from `bw list folders` ...");
-    let mut folders = read_bw_array(&["list", "folders"], "folders")?;
+    eprintln!("Running `bw --raw export --format json` ...");
+    let export_text = run_bw_text(&["--raw", "export", "--format", "json"])?;
+    let mut export_json: Value = serde_json::from_str(&export_text)
+        .map_err(|e| format!("parsing `bw --raw export --format json`: {e}"))?;
+
+    let folders_value = export_json
+        .get_mut("folders")
+        .ok_or("`bw export` output missing top-level `folders` array")?
+        .take();
+    let mut folders = folders_value
+        .as_array()
+        .cloned()
+        .ok_or_else(|| "`bw export` output's `folders` field was not a JSON array".to_string())?;
     for folder in &mut folders {
         strip_cli_only_fields(folder);
     }
 
-    eprintln!("Reading active items from `bw list items` ...");
-    let mut items = read_bw_array(&["list", "items"], "items")?;
+    let items_value = export_json
+        .get_mut("items")
+        .ok_or("`bw export` output missing top-level `items` array")?
+        .take();
+    let mut items = items_value
+        .as_array()
+        .cloned()
+        .ok_or_else(|| "`bw export` output's `items` field was not a JSON array".to_string())?;
     for item in &mut items {
         strip_cli_only_fields(item);
     }
@@ -91,6 +110,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .filter(|item| item.get("type").and_then(Value::as_i64) == Some(4))
         .count();
+    let archived_count = items
+        .iter()
+        .filter(|item| {
+            item.get("archivedDate")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+        })
+        .count();
+    // `bw export --format json` should never emit trashed ciphers; if it does,
+    // surface the count loudly so a vault-state surprise never goes unnoticed.
     let non_null_deleted_date_count = items
         .iter()
         .filter(|item| {
@@ -122,14 +151,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(last_sync) = status.last_sync.as_deref() {
         println!("  last sync: {last_sync} (before this run's forced sync)");
     }
-    println!("  source:    official `bw` CLI (`bw list items`, active vault only)");
+    println!(
+        "  source:    official `bw` CLI (`bw --raw export --format json`; \
+         Trash filtered, Archive preserved)"
+    );
     println!("  snapshot:  {}", snap.path.display());
     println!("  bytes:     {}", snap.byte_count);
     println!("  items:     {}", snap.item_count);
     println!("  identities:{identity_count:>5}");
+    println!("  archived:  {archived_count}");
     println!("  folders:   {}", snap.folder_count);
     if non_null_deleted_date_count > 0 {
-        println!("  warning:   {non_null_deleted_date_count} listed items carried deletedDate");
+        println!(
+            "  warning:   {non_null_deleted_date_count} exported items carried deletedDate \
+             (unexpected — `bw export` should drop Trash)"
+        );
     }
     println!();
     println!("This file is **maximum-sensitivity plaintext** — passwords, TOTP seeds,");
@@ -157,22 +193,6 @@ fn require_unlocked(status: &BwStatus) -> Result<(), Box<dyn std::error::Error>>
         )
         .into()),
     }
-}
-
-fn read_bw_array(
-    args: &[&str],
-    label: &'static str,
-) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let out = run_bw_text(args)?;
-    let value: Value =
-        serde_json::from_str(&out).map_err(|e| format!("parsing `bw {}`: {e}", args.join(" ")))?;
-    value.as_array().cloned().ok_or_else(|| {
-        format!(
-            "`bw {}` did not return a JSON array for {label}",
-            args.join(" ")
-        )
-        .into()
-    })
 }
 
 fn strip_cli_only_fields(value: &mut Value) {

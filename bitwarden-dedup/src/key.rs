@@ -145,6 +145,14 @@ fn empty_password_signal_ok(item: &Value) -> bool {
     user_ok || uri_ok || fido_ok
 }
 
+fn has_non_null_state_date(item: &Value, field: &str) -> bool {
+    item.get(field).is_some_and(|v| !v.is_null())
+}
+
+fn is_archived_or_trashed(item: &Value) -> bool {
+    has_non_null_state_date(item, "deletedDate") || has_non_null_state_date(item, "archivedDate")
+}
+
 /// Return `true` for login (`type: 1`) items that the empty-password
 /// dedup pass should consider for grouping.
 ///
@@ -166,7 +174,7 @@ pub fn is_dedupable_empty_password_login(item: &Value) -> bool {
     if item.get("type").and_then(Value::as_u64) != Some(1) {
         return false;
     }
-    if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
+    if is_archived_or_trashed(item) {
         return false;
     }
     if item.get("reprompt").and_then(Value::as_u64) == Some(1) {
@@ -337,13 +345,16 @@ fn with_port(host: String, url: &url::Url) -> String {
 /// skip this path (they have their own grouping rules — see
 /// [`is_dedupable_secure_note`]), master-password-gated items are left
 /// alone, empty-password items would spuriously group on `""`, and
-/// anything already tagged `[duplicate]` or sitting in the trash is
-/// skipped.
+/// anything already tagged `[duplicate]`, sitting in the trash, or
+/// archived is skipped. Archive is a protected state: Bitwarden
+/// exports it, but dedup must preserve archived items byte-for-byte
+/// rather than merging them with an active twin and accidentally
+/// changing visibility on re-import.
 pub fn skip_from_dedup(item: &Value) -> bool {
     if item.get("type").and_then(Value::as_u64) != Some(1) {
         return true;
     }
-    if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
+    if is_archived_or_trashed(item) {
         return true;
     }
     if item.get("reprompt").and_then(Value::as_u64) == Some(1) {
@@ -366,13 +377,13 @@ pub fn skip_from_dedup(item: &Value) -> bool {
 /// Secure notes dedup by [`secure_note_key`] — currently
 /// `type=2 \0 normalize_name(name)`. Notes without a name cannot group
 /// (we have nothing stable to hash on). Master-password-gated
-/// (`reprompt == 1`) and already-trashed notes pass through untouched
-/// for the same safety reasons as logins.
+/// (`reprompt == 1`), already-trashed, and archived notes pass
+/// through untouched for the same safety reasons as logins.
 pub fn is_dedupable_secure_note(item: &Value) -> bool {
     if item.get("type").and_then(Value::as_u64) != Some(2) {
         return false;
     }
-    if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
+    if is_archived_or_trashed(item) {
         return false;
     }
     if item.get("reprompt").and_then(Value::as_u64) == Some(1) {
@@ -461,7 +472,7 @@ pub fn is_dedupable_ssh_key(item: &Value) -> bool {
     if item.get("type").and_then(Value::as_u64) != Some(5) {
         return false;
     }
-    if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
+    if is_archived_or_trashed(item) {
         return false;
     }
     if item.get("reprompt").and_then(Value::as_u64) == Some(1) {
@@ -514,8 +525,8 @@ pub fn ssh_key_key(item: &Value) -> String {
 /// trailing whitespace difference in the cardholder name keeps items
 /// distinct.
 ///
-/// The same safety floor applies as for logins: trashed, reprompt-
-/// gated, and `[duplicate]`-tagged items pass through untouched.
+/// The same safety floor applies as for logins: trashed, archived,
+/// reprompt-gated, and `[duplicate]`-tagged items pass through untouched.
 /// Items whose `card` field is missing, `null`, or any non-object
 /// JSON value are refused — there is nothing stable to group on, and
 /// canonicalizing `null` would let every malformed `{"type":3,
@@ -526,7 +537,7 @@ pub fn is_dedupable_card(item: &Value) -> bool {
     if item.get("type").and_then(Value::as_u64) != Some(3) {
         return false;
     }
-    if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
+    if is_archived_or_trashed(item) {
         return false;
     }
     if item.get("reprompt").and_then(Value::as_u64) == Some(1) {
@@ -579,7 +590,7 @@ pub fn card_key(item: &Value) -> String {
 /// identical (same name, address, email, phone, government IDs,
 /// etc.). Any mismatch in any field keeps items distinct.
 ///
-/// Same safety floor as cards: trashed, reprompt-gated, and
+/// Same safety floor as cards: trashed, archived, reprompt-gated, and
 /// `[duplicate]`-tagged items pass through; items whose `identity`
 /// field is missing, `null`, or any non-object JSON value are
 /// refused (canonicalizing `null` would let malformed records
@@ -588,7 +599,7 @@ pub fn is_dedupable_identity(item: &Value) -> bool {
     if item.get("type").and_then(Value::as_u64) != Some(4) {
         return false;
     }
-    if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
+    if is_archived_or_trashed(item) {
         return false;
     }
     if item.get("reprompt").and_then(Value::as_u64) == Some(1) {
@@ -1795,6 +1806,35 @@ mod tests {
 
         let number_block = json!({"type": 4, "name": "my", "identity": 42});
         assert!(!is_dedupable_identity(&number_block));
+    }
+
+    #[test]
+    fn archived_items_skip_all_item_dedup_passes() {
+        let archived_at = json!("2026-04-27T12:00:00Z");
+
+        let mut strict_login = login("GitHub", "alex@example.test", "pw");
+        strict_login["archivedDate"] = archived_at.clone();
+        assert!(skip_from_dedup(&strict_login));
+
+        let mut empty_pw = with_uris(empty_pw_login("Acme", "u"), &["https://acme.example/"]);
+        empty_pw["archivedDate"] = archived_at.clone();
+        assert!(!is_dedupable_empty_password_login(&empty_pw));
+
+        let mut secure_note = json!({"type": 2, "name": "Recovery", "notes": "codes"});
+        secure_note["archivedDate"] = archived_at.clone();
+        assert!(!is_dedupable_secure_note(&secure_note));
+
+        let mut ssh_key = ssh_key_item("ssh-ed25519 AAA", "private", "SHA256:fp");
+        ssh_key["archivedDate"] = archived_at.clone();
+        assert!(!is_dedupable_ssh_key(&ssh_key));
+
+        let mut card = card_item("Visa", "4111", "12", "2030", "123");
+        card["archivedDate"] = archived_at.clone();
+        assert!(!is_dedupable_card(&card));
+
+        let mut identity = identity_item("my", "Alex", "Orlov", "u@example.test");
+        identity["archivedDate"] = archived_at;
+        assert!(!is_dedupable_identity(&identity));
     }
 
     #[test]

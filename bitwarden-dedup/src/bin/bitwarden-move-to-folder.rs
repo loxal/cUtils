@@ -196,6 +196,7 @@ fn is_primary_vault_export(path: &Path) -> bool {
         ".dedup.json",
         ".dedup.audit.json",
         ".dedup.trashed.json",
+        "-with-trash.json",
         "-with-icloud-credentials.json",
         "-with-icloud-credentials.audit.json",
         "-with-icloud-credentials.trashed.json",
@@ -429,6 +430,16 @@ mod tests {
         // body — that's encrypted, not a dedup input.
         assert!(!is_primary_vault_export(Path::new(
             "vault/bitwarden_encrypted-export_20260101000000.json"
+        )));
+    }
+
+    #[test]
+    fn primary_export_rejects_decrypted_with_trash_snapshot() {
+        assert!(!is_primary_vault_export(Path::new(
+            "vault/bitwarden_decrypted-export_20260101000000-with-trash.json"
+        )));
+        assert!(!is_primary_vault_export(Path::new(
+            "vault/bitwarden_decrypted-export_20260101000000123-with-trash.json"
         )));
     }
 

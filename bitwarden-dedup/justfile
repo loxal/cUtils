@@ -2,7 +2,7 @@
 #
 # bitwarden-dedup — task runner
 #
-# Six binaries:
+# Seven binaries:
 #
 # JSON-path tools (offline; consume a Bitwarden JSON export):
 #   * bitwarden-dedup                 — deduplicate a real export into an
@@ -31,8 +31,14 @@
 #                                        Archive, and writes a
 #                                        `just dedup`-ready JSON.
 #   * bitwarden-backup-vault-decrypted-via-bw-cli
-#                                      — same output shape, sourced through
-#                                        the official `bw` CLI.
+#                                      — cross-check path with the same
+#                                        Trash-filtered / Archive-preserved
+#                                        contract, but sourced through
+#                                        `bw --raw export --format json`
+#                                        (the official Bitwarden CLI).
+#                                        Independent code path; same output
+#                                        shape; useful for sanity-checking
+#                                        the direct-REST sibling.
 #
 # Default recipe (running `just`) prints the list.
 
@@ -65,6 +71,7 @@ dedup input='' output='' audit='' split_divergent_totps='' keep_empty_password_s
         fi
         input=$({ find vault -maxdepth 1 -type f \
             \( -name 'bitwarden_export_*.json' -o -name 'bitwarden_decrypted-export_*.json' \) \
+            ! -name 'bitwarden_decrypted-export_*-with-trash.json' \
             ! -name '*.dedup.json' \
             ! -name '*.dedup.audit.json' \
             ! -name '*.dedup.trashed.json' \
@@ -127,6 +134,7 @@ merge-with-icloud-credentials-csv bitwarden='' icloud='' output='' audit='' spli
         fi
         bw=$({ find vault -maxdepth 1 -type f \
             \( -name 'bitwarden_export_*.json' -o -name 'bitwarden_decrypted-export_*.json' \) \
+            ! -name 'bitwarden_decrypted-export_*-with-trash.json' \
             ! -name '*.dedup.json' \
             ! -name '*.dedup.audit.json' \
             ! -name '*.dedup.trashed.json' \
@@ -243,7 +251,8 @@ backup-vault-encrypted:
 # includes Trash and Archive; this recipe filters Trash by default to match
 # official `bw export --format json` semantics and preserves Archive by keeping
 # `archivedDate`. Pass `--include-trash` directly with `cargo run` only for a
-# forensic snapshot.
+# forensic snapshot; that file is suffixed `-with-trash.json` and intentionally
+# skipped by the auto-discovery recipes above.
 #
 # Writes a `just dedup`-ready JSON-export-shape file to
 # `vault/bitwarden_decrypted-export_<UTC-ts>.json` (mode 0o600, gitignored).
@@ -258,11 +267,15 @@ backup-vault-encrypted:
 backup-vault-decrypted:
     cargo run --locked --release --bin bitwarden-backup-vault-decrypted
 
-# Decrypted backup through the official Bitwarden CLI.
+# Decrypted backup through the official Bitwarden CLI's own export command.
 #
-# This is useful as an independent cross-check for the direct REST decoder.
-# It shells out to `bw sync --force`, `bw list folders`, and `bw list items`,
-# so it requires a logged-in, unlocked CLI session:
+# This is the cross-check path for the direct REST decoder: it shells out to
+# `bw sync --force` and `bw --raw export --format json`. The output matches
+# `bw export` semantics — Trash filtered, Archive preserved — so for the
+# same server state it should agree with `just backup-vault-decrypted` on
+# id sets and per-cipher field tuples.
+#
+# Requires a logged-in, unlocked CLI session:
 #   `export BW_SESSION="$(bw unlock --raw)"`
 backup-vault-decrypted-via-bw-cli:
     cargo run --locked --release --bin bitwarden-backup-vault-decrypted-via-bw-cli

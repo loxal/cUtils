@@ -32,11 +32,16 @@ FIDO2 credentials, notes, custom fields, and password history.
 >   every cipher field. Raw `/api/sync` contains Trash and Archive;
 >   the dedup-ready output filters Trash by default to match official
 >   `bw export --format json` semantics and preserves Archive via
->   `archivedDate`. Use `--include-trash` only for forensic snapshots.
-> - **`just backup-vault-decrypted-via-bw-cli`** — secondary
->   cross-check path through the official CLI: `bw sync --force`,
->   then `bw list folders` / `bw list items`. Prerequisite: the
->   Bitwarden CLI is logged in and unlocked
+>   `archivedDate`. Use `--include-trash` only for forensic snapshots;
+>   those files are suffixed `-with-trash.json` and skipped by
+>   `just dedup` auto-discovery.
+> - **`just backup-vault-decrypted-via-bw-cli`** — cross-check path
+>   through the official CLI's own export command: `bw sync --force`,
+>   then `bw --raw export --format json`. Same `bw export` contract
+>   as the direct-REST sibling (Trash filtered, Archive preserved),
+>   so for the same server state the two backups should agree on id
+>   sets and per-cipher field tuples. Prerequisite: the Bitwarden CLI
+>   is logged in and unlocked
 >   (`export BW_SESSION="$(bw unlock --raw)"`).
 >
 > The decrypted output is **plaintext-sensitive** (passwords, TOTP
