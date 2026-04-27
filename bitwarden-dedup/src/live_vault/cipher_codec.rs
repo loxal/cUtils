@@ -356,31 +356,31 @@ pub fn decrypt_sync_to_export_shape(
     }))
 }
 
-/// Counts returned by [`filter_export_to_bw_list_active_items`].
+/// Counts returned by [`filter_export_to_bw_export_items`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ActiveItemFilterStats {
+pub struct ExportItemFilterStats {
     pub kept: usize,
     pub trashed_omitted: usize,
-    pub archived_omitted: usize,
+    pub archived_kept: usize,
 }
 
-/// Mutate a decrypted export so its `items` match `bw list items`.
+/// Mutate a decrypted `/api/sync` export so its `items` match
+/// `bw export --format json` item-state semantics.
 ///
-/// Official `bw list items` defaults to visible active-vault items:
-/// not in Trash (`deletedDate == null`) and not archived
-/// (`archivedDate == null`). Raw `/api/sync` includes both states,
-/// so a direct REST backup must apply the same client-side filter
-/// before handing the JSON to `just dedup`.
-pub fn filter_export_to_bw_list_active_items(
+/// Official Bitwarden exports omit Trash (`deletedDate != null`) but
+/// preserve Archive (`archivedDate != null`) so archive state can
+/// round-trip through JSON import. Raw `/api/sync` includes Trash too,
+/// so the direct REST backup applies this export filter before
+/// handing the JSON to `just dedup`.
+pub fn filter_export_to_bw_export_items(
     export: &mut Value,
     include_trash: bool,
-    include_archived: bool,
-) -> ActiveItemFilterStats {
+) -> ExportItemFilterStats {
     let Some(items) = export.get_mut("items").and_then(Value::as_array_mut) else {
-        return ActiveItemFilterStats::default();
+        return ExportItemFilterStats::default();
     };
 
-    let mut stats = ActiveItemFilterStats::default();
+    let mut stats = ExportItemFilterStats::default();
     let mut kept = Vec::with_capacity(items.len());
 
     for item in std::mem::take(items) {
@@ -397,12 +397,11 @@ pub fn filter_export_to_bw_list_active_items(
             stats.trashed_omitted += 1;
             continue;
         }
-        if archived && !include_archived {
-            stats.archived_omitted += 1;
-            continue;
-        }
 
         stats.kept += 1;
+        if archived {
+            stats.archived_kept += 1;
+        }
         kept.push(item);
     }
 
@@ -839,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn active_item_filter_matches_bw_list_items_by_default() {
+    fn export_item_filter_matches_bw_export_semantics_by_default() {
         let mut export = json!({
             "encrypted": false,
             "folders": [],
@@ -851,22 +850,23 @@ mod tests {
             ]
         });
 
-        let stats = filter_export_to_bw_list_active_items(&mut export, false, false);
+        let stats = filter_export_to_bw_export_items(&mut export, false);
 
         assert_eq!(
             stats,
-            ActiveItemFilterStats {
-                kept: 1,
+            ExportItemFilterStats {
+                kept: 2,
                 trashed_omitted: 2,
-                archived_omitted: 1,
+                archived_kept: 1,
             }
         );
-        assert_eq!(export["items"].as_array().unwrap().len(), 1);
+        assert_eq!(export["items"].as_array().unwrap().len(), 2);
         assert_eq!(export["items"][0]["id"], "active");
+        assert_eq!(export["items"][1]["id"], "archived");
     }
 
     #[test]
-    fn active_item_filter_can_include_trash_and_archive_for_forensics() {
+    fn export_item_filter_can_include_trash_for_forensics() {
         let mut export = json!({
             "items": [
                 {"id": "active", "deletedDate": null, "archivedDate": null},
@@ -875,14 +875,14 @@ mod tests {
             ]
         });
 
-        let stats = filter_export_to_bw_list_active_items(&mut export, true, true);
+        let stats = filter_export_to_bw_export_items(&mut export, true);
 
         assert_eq!(
             stats,
-            ActiveItemFilterStats {
+            ExportItemFilterStats {
                 kept: 3,
                 trashed_omitted: 0,
-                archived_omitted: 0,
+                archived_kept: 1,
             }
         );
         assert_eq!(export["items"].as_array().unwrap().len(), 3);

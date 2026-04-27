@@ -30,9 +30,9 @@ FIDO2 credentials, notes, custom fields, and password history.
 > - **`just backup-vault-decrypted`** — uses the same REST/API-key
 >   path, then prompts for the master password locally and decrypts
 >   every cipher field. Raw `/api/sync` contains Trash and Archive;
->   the dedup-ready output filters both by default to match official
->   `bw list items` visible-vault semantics. Use the binary flags
->   `--include-trash` / `--include-archived` only for forensic snapshots.
+>   the dedup-ready output filters Trash by default to match official
+>   `bw export --format json` semantics and preserves Archive via
+>   `archivedDate`. Use `--include-trash` only for forensic snapshots.
 > - **`just backup-vault-decrypted-via-bw-cli`** — secondary
 >   cross-check path through the official CLI: `bw sync --force`,
 >   then `bw list folders` / `bw list items`. Prerequisite: the

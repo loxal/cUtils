@@ -15,9 +15,9 @@
 //!     `vault/bitwarden_decrypted-export_<UTC-ts>.json` (mode 0o600,
 //!     gitignored). Directly consumable by `just dedup`.
 //!
-//! The output intentionally matches the official CLI's default
-//! `bw list items` state filter: deleted and archived ciphers from
-//! `/api/sync` are omitted from the dedup-ready file. The encrypted
+//! The output intentionally matches official `bw export --format json`
+//! item-state semantics: deleted ciphers from `/api/sync` are omitted,
+//! archived ciphers are preserved with `archivedDate`, and the encrypted
 //! `/api/sync` snapshot remains the full forensic backup.
 //!
 //! **The decrypted output is maximum-sensitivity plaintext** —
@@ -31,7 +31,7 @@ use bitwarden_dedup::live_vault::{
     Region,
     auth::{ApiKeyCredentials, acquire_access_token, persistent_device_identifier},
     cipher_codec::{
-        decrypt_sync_to_export_shape, extract_account_email, filter_export_to_bw_list_active_items,
+        decrypt_sync_to_export_shape, extract_account_email, filter_export_to_bw_export_items,
     },
     rest::{SyncError, fetch_prelogin, fetch_sync},
     snapshot::{recoverable_snapshot_path, write_recoverable},
@@ -42,9 +42,9 @@ use secrecy::SecretString;
 #[derive(Parser, Debug)]
 #[command(
     name = "bitwarden-backup-vault-decrypted",
-    about = "Decrypted active-vault backup via Bitwarden REST API. Prompts for \
-             the master password, decrypts /api/sync, filters out archived/trash \
-             ciphers like `bw list items`, and writes a `just dedup`-ready JSON."
+    about = "Decrypted Bitwarden export backup via REST API. Prompts for \
+             the master password, decrypts /api/sync, filters trash like \
+             `bw export`, preserves archive state, and writes a `just dedup`-ready JSON."
 )]
 struct Cli {
     /// Path to the env file carrying `BW_CLIENT_ID`,
@@ -54,14 +54,9 @@ struct Cli {
     env_file: PathBuf,
 
     /// Include ciphers currently in Bitwarden Trash. The default
-    /// matches `bw list items` and omits them.
+    /// matches `bw export --format json` and omits them.
     #[arg(long)]
     include_trash: bool,
-
-    /// Include archived ciphers. The default matches `bw list items`
-    /// and omits them.
-    #[arg(long)]
-    include_archived: bool,
 }
 
 fn main() -> ExitCode {
@@ -135,11 +130,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Decrypting vault ...");
     let mut decrypted = decrypt_sync_to_export_shape(&sync_body, kdf, &master_password)?;
     let before_count = item_count(&decrypted);
-    let filter_stats = filter_export_to_bw_list_active_items(
-        &mut decrypted,
-        cli.include_trash,
-        cli.include_archived,
-    );
+    let filter_stats = filter_export_to_bw_export_items(&mut decrypted, cli.include_trash);
     let after_count = item_count(&decrypted);
     let folder_count = decrypted
         .get("folders")
@@ -147,10 +138,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(|a| a.len())
         .unwrap_or(0);
     eprintln!("OK — decrypted {before_count} items / {folder_count} folders");
-    if !cli.include_trash || !cli.include_archived {
+    if !cli.include_trash {
         eprintln!(
-            "Filtered to {after_count} `bw list items`-visible items (omitted {} trashed, {} archived).",
-            filter_stats.trashed_omitted, filter_stats.archived_omitted
+            "Filtered to {after_count} `bw export` items (omitted {} trashed, preserved {} archived).",
+            filter_stats.trashed_omitted, filter_stats.archived_kept
         );
     }
 
@@ -161,15 +152,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     println!("Decrypted backup complete");
     println!("  region:    {:?}", region);
     println!("  endpoint:  {}/sync", region.api_base_url());
-    println!("  source:    REST /api/sync, filtered to active items by default");
+    println!("  source:    REST /api/sync, filtered to Bitwarden export semantics");
     println!("  snapshot:  {}", snap.path.display());
     println!("  bytes:     {}", snap.byte_count);
     println!("  items:     {}", snap.item_count);
     println!("  folders:   {}", snap.folder_count);
-    if filter_stats.trashed_omitted > 0 || filter_stats.archived_omitted > 0 {
+    if filter_stats.trashed_omitted > 0 || filter_stats.archived_kept > 0 {
         println!(
-            "  omitted:   {} trashed, {} archived",
-            filter_stats.trashed_omitted, filter_stats.archived_omitted
+            "  state:     omitted {} trashed; preserved {} archived",
+            filter_stats.trashed_omitted, filter_stats.archived_kept
         );
     }
     println!();

@@ -23,12 +23,13 @@
 #                                        vault/bitwarden_api_key.env.
 #                                        Writes the raw /api/sync response to
 #                                        vault/bitwarden_encrypted-export_<ts>.json.
-#   * bitwarden-backup-vault-decrypted — decrypted active-vault backup via
+#   * bitwarden-backup-vault-decrypted — decrypted export backup via
 #                                        REST + local decrypt. Uses the
 #                                        personal API key, prompts for the
 #                                        master password locally, filters
-#                                        Trash/Archive like `bw list items`,
-#                                        and writes a `just dedup`-ready JSON.
+#                                        Trash like `bw export`, preserves
+#                                        Archive, and writes a
+#                                        `just dedup`-ready JSON.
 #   * bitwarden-backup-vault-decrypted-via-bw-cli
 #                                      — same output shape, sourced through
 #                                        the official `bw` CLI.
@@ -235,13 +236,14 @@ redact input output:
 backup-vault-encrypted:
     cargo run --locked --release --bin bitwarden-backup-vault-encrypted
 
-# Decrypted backup of the live active Bitwarden vault via REST + local decrypt.
+# Decrypted backup of the live Bitwarden vault via REST + local decrypt.
 #
 # This keeps the direct API-key path: OAuth `client_credentials`, `/api/sync`,
 # local master-key derivation, and local cipher decrypt. The raw sync response
-# includes Trash and Archive; this recipe filters both by default to match
-# official `bw list items` visible-vault semantics. Pass binary flags directly
-# with `cargo run` if you need `--include-trash` or `--include-archived`.
+# includes Trash and Archive; this recipe filters Trash by default to match
+# official `bw export --format json` semantics and preserves Archive by keeping
+# `archivedDate`. Pass `--include-trash` directly with `cargo run` only for a
+# forensic snapshot.
 #
 # Writes a `just dedup`-ready JSON-export-shape file to
 # `vault/bitwarden_decrypted-export_<UTC-ts>.json` (mode 0o600, gitignored).
