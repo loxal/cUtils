@@ -503,15 +503,27 @@ pub(crate) fn secure_note_source_label(item: &Value) -> &'static str {
 /// item (full `sshKey` object / full `card` object / full `identity`
 /// object), so by the time we get here every item in the group
 /// shares identical credential material. The survivor keeps its own
-/// type-specific block untouched; this patch only carries the merge
+/// type-specific block untouched; this patch carries the merge
 /// subset that remains meaningful: longest name, favorite OR,
-/// field/collection unions, folder disambiguation note.
+/// field/collection/notes unions, folder disambiguation note.
+///
+/// **Notes** are unioned the same way logins handle them — the
+/// strict key only covers the credential block, so two cards with
+/// byte-equal `card` data but different top-level `notes` still
+/// collapse, and the loser's note text needs to land on the
+/// survivor or it would be stranded in the trash sidecar.
 pub(crate) struct MetadataPatch {
     pub(crate) longest_name: String,
+    pub(crate) notes: Option<String>,
     pub(crate) field_additions: Vec<Value>,
     pub(crate) collection_additions: Vec<String>,
     pub(crate) folder_note_line: Option<String>,
     pub(crate) favorite: bool,
+    /// Did any drop contribute distinct note text to the survivor?
+    pub(crate) notes_merged: bool,
+    /// Did the merge truncate the assembled notes body to fit
+    /// Bitwarden's 10 000-character encrypted-field cap?
+    pub(crate) notes_truncated: bool,
 }
 
 pub(crate) fn build_metadata_patch(
@@ -527,23 +539,59 @@ pub(crate) fn build_metadata_patch(
             longest_name = dn.to_string();
         }
     }
+
+    // Notes union — same shape as `build_survivor_patch`. The
+    // truncation cap protects against a survivor with a very long
+    // note plus several drops with their own long notes blowing
+    // past Bitwarden's 10 000-char ciphertext limit on import.
+    let keep_note_trimmed = get_str(keep, "notes").trim().to_string();
+    let merged_notes = merge_notes(keep, drops);
+    let notes_merged = match &merged_notes {
+        Some(body) => body.trim() != keep_note_trimmed,
+        None => false,
+    };
+    let folder_line_overhead = folder_disambiguation_note(keep, drops, folders)
+        .as_deref()
+        .map(|line| line.len() + 1)
+        .unwrap_or(0);
+    let (notes, notes_truncated) = match merged_notes {
+        Some(body) if notes_merged => {
+            let (truncated_body, was_truncated) =
+                truncate_notes_to_budget(body, folder_line_overhead);
+            (Some(truncated_body), was_truncated)
+        }
+        n => (n, false),
+    };
+
     MetadataPatch {
         longest_name,
+        notes,
         field_additions: fields_to_merge(keep, drops),
         collection_additions: collections_to_merge(keep, drops),
         folder_note_line: folder_disambiguation_note(keep, drops, folders),
         favorite: item_is_favorite(keep) || drops.iter().any(|d| item_is_favorite(d)),
+        notes_merged,
+        notes_truncated,
     }
 }
 
 pub(crate) fn apply_metadata_patch(item: &mut Value, patch: MetadataPatch) {
-    // Folder-disambiguation line (if any) lands on `notes`; the
-    // type-specific block (sshKey / card / identity) is never touched.
+    // Notes assembly mirrors the login pass: folder-disambiguation
+    // line (if any) prepended to the merged-notes body. The
+    // type-specific block (sshKey / card / identity) is never
+    // touched — it's part of the grouping key, so every item in
+    // the group already carries identical credential material.
     let keep_notes = get_str(item, "notes").to_string();
-    let final_notes = match patch.folder_note_line.as_deref() {
-        Some(line) if !keep_notes.is_empty() => Some(format!("{line}\n{keep_notes}")),
-        Some(line) => Some(line.to_string()),
-        None => None,
+    let body = patch
+        .notes
+        .as_deref()
+        .map(str::to_string)
+        .unwrap_or(keep_notes);
+    let final_notes = match (patch.folder_note_line.as_deref(), body.as_str()) {
+        (Some(line), b) if !b.is_empty() => Some(format!("{line}\n{b}")),
+        (Some(line), _) => Some(line.to_string()),
+        (None, b) if !b.is_empty() => Some(b.to_string()),
+        _ => None,
     };
 
     let Some(obj) = item.as_object_mut() else {

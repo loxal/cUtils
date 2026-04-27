@@ -215,14 +215,16 @@ fn dedup_stats_carries_per_pass_breakdown_for_audit_consumers() {
     assert_eq!(stats.ssh_key_groups, 0);
 
     // Sum invariant — the back-compat `groups` field must equal the
-    // sum of the four per-pass counters so audit consumers reading
-    // either form get consistent numbers.
+    // sum of the six item-level per-pass counters so audit consumers
+    // reading either form get consistent numbers.
     assert_eq!(
         stats.groups,
         stats.strict_login_groups
             + stats.empty_password_groups
             + stats.secure_note_groups
             + stats.ssh_key_groups
+            + stats.card_groups
+            + stats.identity_groups
     );
 
     // Signal-kind breakdown sums to empty_password_groups.

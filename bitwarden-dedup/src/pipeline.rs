@@ -187,8 +187,11 @@ impl SignalKind {
 pub struct DedupStats {
     pub total: usize,
     pub skipped: usize,
-    /// Total dedup groups across all passes. Kept as the back-compat
-    /// sum of the four per-pass counters below.
+    /// Total dedup groups across all item-level passes. Kept as the
+    /// back-compat sum of the six per-pass counters below
+    /// (`strict_login_groups` + `empty_password_groups` +
+    /// `secure_note_groups` + `ssh_key_groups` + `card_groups` +
+    /// `identity_groups`).
     pub groups: usize,
     /// Strict login pass (non-empty password, [`crate::key::dedup_key`]).
     pub strict_login_groups: usize,
@@ -1014,6 +1017,8 @@ fn dedup_strict_metadata_pass(
         let fields_merged = patch.field_additions.len();
         let collections_merged = patch.collection_additions.len();
         let folder_note_added = patch.folder_note_line.is_some();
+        let notes_merged_flag = patch.notes_merged;
+        let notes_truncated_flag = patch.notes_truncated;
 
         for &di in drop_idxs {
             to_drop.insert(di);
@@ -1029,6 +1034,8 @@ fn dedup_strict_metadata_pass(
                 "kept_name": keep_name_audit.clone(),
                 "kept_revisionDate": keep_rev.clone(),
                 "kept_folderId": keep_folder.clone(),
+                "notes_merged": notes_merged_flag,
+                "notes_truncated": notes_truncated_flag,
                 "fields_merged": fields_merged,
                 "collections_merged": collections_merged,
                 "folder_note_added": folder_note_added,
@@ -1619,12 +1626,16 @@ mod tests {
         assert_eq!(stats.empty_password_groups, 1);
         assert_eq!(stats.secure_note_groups, 0);
         assert_eq!(stats.ssh_key_groups, 0);
+        assert_eq!(stats.card_groups, 0);
+        assert_eq!(stats.identity_groups, 0);
         assert_eq!(
             stats.groups,
             stats.strict_login_groups
                 + stats.empty_password_groups
                 + stats.secure_note_groups
                 + stats.ssh_key_groups
+                + stats.card_groups
+                + stats.identity_groups
         );
     }
 
@@ -1838,6 +1849,118 @@ mod tests {
         let stats = dedup_items(&mut items);
         assert_eq!(stats.identity_groups, 0);
         assert_eq!(stats.living, 2);
+    }
+
+    #[test]
+    fn cards_with_divergent_notes_union_onto_survivor() {
+        // Regression for the C24-orange / IBAN case: two cards with
+        // byte-equal `card` blocks but different top-level `notes`
+        // collapse on the strict key. Without notes-merging, the
+        // loser's IBAN-shaped note is stranded in the trash sidecar
+        // and never reaches the active vault.
+        let mut items = vec![
+            json!({
+                "id": "c1", "type": 3, "name": "C24",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "notes": "",
+                "card": {
+                    "cardholderName": "A", "brand": "Visa",
+                    "number": "4111111111111111", "expMonth": "12",
+                    "expYear": "2030", "code": "123"
+                }
+            }),
+            json!({
+                "id": "c2", "type": 3, "name": "C24",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "notes": "DE27 5002 4024 5400 0898 01",
+                "card": {
+                    "cardholderName": "A", "brand": "Visa",
+                    "number": "4111111111111111", "expMonth": "12",
+                    "expYear": "2030", "code": "123"
+                }
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.card_groups, 1);
+        assert_eq!(stats.trashed, 1);
+        let survivor = items
+            .iter()
+            .find(|i| i["deletedDate"].is_null())
+            .unwrap();
+        let notes = survivor["notes"].as_str().unwrap_or("");
+        assert!(
+            notes.contains("DE27 5002 4024 5400 0898 01"),
+            "loser's IBAN-shaped notes must land on the active survivor; got {notes:?}"
+        );
+        // Audit reflects that notes merged.
+        let entry = stats
+            .audit_entries
+            .iter()
+            .find(|e| e["item_kind"] == "card")
+            .expect("card audit entry");
+        assert_eq!(entry["notes_merged"], true);
+        assert_eq!(entry["notes_truncated"], false);
+    }
+
+    #[test]
+    fn identities_with_divergent_notes_union_onto_survivor() {
+        let mut items = vec![
+            json!({
+                "id": "i1", "type": 4, "name": "my",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "notes": "primary",
+                "identity": {"firstName": "Alex"}
+            }),
+            json!({
+                "id": "i2", "type": 4, "name": "my",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "notes": "DOB: 1990-01-01",
+                "identity": {"firstName": "Alex"}
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.identity_groups, 1);
+        let survivor = items
+            .iter()
+            .find(|i| i["deletedDate"].is_null())
+            .unwrap();
+        let notes = survivor["notes"].as_str().unwrap_or("");
+        assert!(notes.contains("primary"));
+        assert!(notes.contains("DOB: 1990-01-01"));
+        let entry = stats
+            .audit_entries
+            .iter()
+            .find(|e| e["item_kind"] == "identity")
+            .expect("identity audit entry");
+        assert_eq!(entry["notes_merged"], true);
+    }
+
+    #[test]
+    fn cards_with_byte_equal_notes_do_not_flag_notes_merged() {
+        // When every item in the group has byte-equal notes, the
+        // merge is a no-op and `notes_merged` must stay false.
+        let mut items = vec![
+            json!({
+                "id": "c1", "type": 3, "name": "X",
+                "revisionDate": "2026-01-01T00:00:00Z",
+                "notes": "same body",
+                "card": {"number": "4111", "expMonth": "12", "expYear": "2030"}
+            }),
+            json!({
+                "id": "c2", "type": 3, "name": "X",
+                "revisionDate": "2026-01-02T00:00:00Z",
+                "notes": "same body",
+                "card": {"number": "4111", "expMonth": "12", "expYear": "2030"}
+            }),
+        ];
+        let stats = dedup_items(&mut items);
+        assert_eq!(stats.card_groups, 1);
+        let entry = stats
+            .audit_entries
+            .iter()
+            .find(|e| e["item_kind"] == "card")
+            .expect("card audit entry");
+        assert_eq!(entry["notes_merged"], false);
     }
 
     #[test]
