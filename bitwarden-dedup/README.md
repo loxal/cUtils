@@ -13,35 +13,57 @@ FIDO2 credentials, notes, custom fields, and password history.
 > The sidecar is your offline recovery copy; import it separately
 > only if you want to populate Bitwarden's Trash folder.
 
-> **JSON-path tools are 100 % offline.** The original four binaries
-> (`bitwarden-dedup`, `bitwarden-merge-icloud`, `bitwarden-redact`,
-> `bitwarden-move-to-folder`) run entirely on your machine, with zero
-> network calls, telemetry, update checks, or cloud APIs. They read a
-> JSON export, process it in memory, and write the results back to
-> disk. Use these whenever you can.
+> **No `bw` CLI required.** The full export → dedup → import workflow
+> runs without the official Bitwarden CLI installed. The four JSON-path
+> binaries (`bitwarden-dedup`, `bitwarden-merge-icloud`,
+> `bitwarden-redact`, `bitwarden-move-to-folder`) are 100 % offline —
+> zero network calls, telemetry, update checks, or cloud APIs. The two
+> live-vault binaries (`bitwarden-backup-vault-encrypted`,
+> `bitwarden-backup-vault-decrypted`) speak directly to
+> `https://api.bitwarden.com` (or `.eu`) over rustls + webpki-roots
+> using the personal API key in `vault/bitwarden_api_key.env` — no
+> Node.js, no `bw login`, no `BW_SESSION`. The seventh binary,
+> `bitwarden-backup-vault-decrypted-via-bw-cli`, is an **optional**
+> cross-check that shells out to `bw`; install the official CLI only
+> if you want a second-opinion source.
 >
-> **Live-vault backups use two different source paths.**
+> **Steady-state recipe (CLI-free):**
 >
+> ```bash
+> just backup-vault-decrypted   # API key + master password → /api/sync → decrypted JSON
+> just dedup                     # local-only, no network
+> ```
+>
+> **The seven binaries:**
+>
+> - **`bitwarden-dedup`**, **`bitwarden-merge-icloud`**,
+>   **`bitwarden-redact`**, **`bitwarden-move-to-folder`** — JSON-path
+>   tools, fully offline. Read an export, process in memory, write
+>   results to disk. Use these whenever you can.
 > - **`just backup-vault-encrypted`** — writes the raw encrypted
 >   `/api/sync` body to `vault/bitwarden_encrypted-export_<UTC-ts>.json`
 >   (0o600, gitignored). No master password requested; cron-friendly.
->   This is a forensic/API snapshot from `https://api.bitwarden.com`
->   or `.eu` using the personal API key in `vault/bitwarden_api_key.env`.
-> - **`just backup-vault-decrypted`** — uses the same REST/API-key
->   path, then prompts for the master password locally and decrypts
->   every cipher field. Raw `/api/sync` contains Trash and Archive;
->   the dedup-ready output filters Trash by default to match official
+>   Forensic/API snapshot using the personal API key in
+>   `vault/bitwarden_api_key.env`.
+> - **`just backup-vault-decrypted`** — same REST/API-key path, then
+>   prompts for the master password locally and decrypts every cipher
+>   field. Raw `/api/sync` contains Trash and Archive; the dedup-ready
+>   output filters Trash by default to match official
 >   `bw export --format json` semantics and preserves Archive via
 >   `archivedDate`. Use `--include-trash` only for forensic snapshots;
 >   those files are suffixed `-with-trash.json` and skipped by
->   `just dedup` auto-discovery.
-> - **`just backup-vault-decrypted-via-bw-cli`** — cross-check path
->   through the official CLI's own export command: `bw sync --force`,
->   then `bw --raw export --format json`. Same `bw export` contract
->   as the direct-REST sibling (Trash filtered, Archive preserved),
->   so for the same server state the two backups should agree on id
->   sets and per-cipher field tuples. Prerequisite: the Bitwarden CLI
->   is logged in and unlocked
+>   `just dedup` auto-discovery. **This is the recommended export
+>   path; it does not require the `bw` CLI.**
+> - **`just backup-vault-decrypted-via-bw-cli`** — *optional*
+>   cross-check path through the official CLI's own export command:
+>   `bw sync --force`, then `bw --raw export --format json`. Same
+>   `bw export` contract as the direct-REST sibling (Trash filtered,
+>   Archive preserved), so for the same server state the two backups
+>   should agree on id sets and per-cipher field tuples. Useful as a
+>   tiebreaker when the two paths ever disagree, or when verifying the
+>   direct-REST decoder hasn't drifted from upstream truth. Skip
+>   entirely if you don't want a Node.js / `bw` dependency.
+>   Prerequisite: the Bitwarden CLI is logged in and unlocked
 >   (`export BW_SESSION="$(bw unlock --raw)"`).
 >
 > The decrypted output is **plaintext-sensitive** (passwords, TOTP
@@ -53,12 +75,35 @@ FIDO2 credentials, notes, custom fields, and password history.
 
 **Step 1 — Export your vault from Bitwarden.**
 
-In the Bitwarden web vault (`vault.bitwarden.com`) or the desktop app:
-**Tools → Export Vault → File format: JSON**. Enter your master
-password when prompted. This downloads a file named
+Pick whichever path is more convenient — both produce the same JSON shape
+and neither requires the `bw` CLI:
+
+*Option A (recommended, fully scripted): use this crate's built-in
+direct-REST exporter.* Populate `vault/bitwarden_api_key.env` with your
+personal API key (Settings → Security → Keys → View API Key in the web
+vault), then:
+
+```bash
+cd bitwarden-dedup
+just build
+just backup-vault-decrypted
+```
+
+This authenticates against `https://api.bitwarden.com` (or `.eu`) over
+rustls + webpki-roots, prompts for your master password locally,
+decrypts every cipher field, and writes
+`vault/bitwarden_decrypted-export_<UTC-ts>.json`. No Node.js, no
+`bw login`, no `BW_SESSION`. Skip to Step 3.
+
+*Option B (manual, no API key needed): use the Bitwarden web vault's
+own export.* In the Bitwarden web vault (`vault.bitwarden.com`) or the
+desktop app: **Tools → Export Vault → File format: JSON**. Enter your
+master password when prompted. This downloads a file named
 `bitwarden_export_YYYYMMDDHHMMSS.json` to your `~/Downloads/` folder.
 
 **Step 2 — Move the export into the `vault/` directory.**
+
+(Skip this step if you used Option A — the file is already in `vault/`.)
 
 ```bash
 cd bitwarden-dedup
