@@ -153,6 +153,7 @@ struct Cipher {
     creation_date: Option<String>,
     revision_date: Option<String>,
     deleted_date: Option<String>,
+    archived_date: Option<String>,
     #[serde(default)]
     collection_ids: Option<Vec<String>>,
 
@@ -355,6 +356,60 @@ pub fn decrypt_sync_to_export_shape(
     }))
 }
 
+/// Counts returned by [`filter_export_to_bw_list_active_items`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveItemFilterStats {
+    pub kept: usize,
+    pub trashed_omitted: usize,
+    pub archived_omitted: usize,
+}
+
+/// Mutate a decrypted export so its `items` match `bw list items`.
+///
+/// Official `bw list items` defaults to visible active-vault items:
+/// not in Trash (`deletedDate == null`) and not archived
+/// (`archivedDate == null`). Raw `/api/sync` includes both states,
+/// so a direct REST backup must apply the same client-side filter
+/// before handing the JSON to `just dedup`.
+pub fn filter_export_to_bw_list_active_items(
+    export: &mut Value,
+    include_trash: bool,
+    include_archived: bool,
+) -> ActiveItemFilterStats {
+    let Some(items) = export.get_mut("items").and_then(Value::as_array_mut) else {
+        return ActiveItemFilterStats::default();
+    };
+
+    let mut stats = ActiveItemFilterStats::default();
+    let mut kept = Vec::with_capacity(items.len());
+
+    for item in std::mem::take(items) {
+        let trashed = item
+            .get("deletedDate")
+            .map(|value| !value.is_null())
+            .unwrap_or(false);
+        let archived = item
+            .get("archivedDate")
+            .map(|value| !value.is_null())
+            .unwrap_or(false);
+
+        if trashed && !include_trash {
+            stats.trashed_omitted += 1;
+            continue;
+        }
+        if archived && !include_archived {
+            stats.archived_omitted += 1;
+            continue;
+        }
+
+        stats.kept += 1;
+        kept.push(item);
+    }
+
+    *items = kept;
+    stats
+}
+
 /// Unwrap `profile.key` (EncString type 2 wrapping a 64-byte
 /// `enc || mac` user-symmetric-key) using the stretched master key.
 fn unwrap_user_key(
@@ -446,6 +501,7 @@ fn decrypt_cipher(cipher: Cipher, user_key: &SymmetricKey) -> Result<Value, Code
     item.insert("creationDate".into(), json!(cipher.creation_date));
     item.insert("revisionDate".into(), json!(cipher.revision_date));
     item.insert("deletedDate".into(), json!(cipher.deleted_date));
+    item.insert("archivedDate".into(), json!(cipher.archived_date));
     item.insert("collectionIds".into(), json!(cipher.collection_ids));
 
     if let Some(fields) = cipher.fields {
@@ -738,7 +794,7 @@ mod tests {
         let user_key_str = encrypt_for_test(
             &stretched,
             b"hardcoded-test-iv",
-            &mut [
+            &[
                 0xa5u8, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
                 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
                 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5,
@@ -761,6 +817,7 @@ mod tests {
                     "id": "cipher-1",
                     "type": 1,
                     "name": "{}",
+                    "archivedDate": "2026-04-27T02:00:00Z",
                     "login": {{"username": null, "password": null, "uris": null}}
                 }}]
             }}"#,
@@ -773,11 +830,62 @@ mod tests {
         let items = result["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], json!("My Login"));
+        assert_eq!(items[0]["archivedDate"], json!("2026-04-27T02:00:00Z"));
         // Type 1 → login subobject present.
         assert!(items[0]["login"].is_object());
         // Top-level shape matches a Bitwarden export.
         assert_eq!(result["encrypted"], json!(false));
         assert!(result["folders"].is_array());
+    }
+
+    #[test]
+    fn active_item_filter_matches_bw_list_items_by_default() {
+        let mut export = json!({
+            "encrypted": false,
+            "folders": [],
+            "items": [
+                {"id": "active", "deletedDate": null, "archivedDate": null},
+                {"id": "trashed", "deletedDate": "2026-04-27T01:00:00Z", "archivedDate": null},
+                {"id": "archived", "deletedDate": null, "archivedDate": "2026-04-27T02:00:00Z"},
+                {"id": "both", "deletedDate": "2026-04-27T03:00:00Z", "archivedDate": "2026-04-27T04:00:00Z"}
+            ]
+        });
+
+        let stats = filter_export_to_bw_list_active_items(&mut export, false, false);
+
+        assert_eq!(
+            stats,
+            ActiveItemFilterStats {
+                kept: 1,
+                trashed_omitted: 2,
+                archived_omitted: 1,
+            }
+        );
+        assert_eq!(export["items"].as_array().unwrap().len(), 1);
+        assert_eq!(export["items"][0]["id"], "active");
+    }
+
+    #[test]
+    fn active_item_filter_can_include_trash_and_archive_for_forensics() {
+        let mut export = json!({
+            "items": [
+                {"id": "active", "deletedDate": null, "archivedDate": null},
+                {"id": "trashed", "deletedDate": "2026-04-27T01:00:00Z", "archivedDate": null},
+                {"id": "archived", "deletedDate": null, "archivedDate": "2026-04-27T02:00:00Z"}
+            ]
+        });
+
+        let stats = filter_export_to_bw_list_active_items(&mut export, true, true);
+
+        assert_eq!(
+            stats,
+            ActiveItemFilterStats {
+                kept: 3,
+                trashed_omitted: 0,
+                archived_omitted: 0,
+            }
+        );
+        assert_eq!(export["items"].as_array().unwrap().len(), 3);
     }
 
     /// Test-only encrypt helper, mirrored from

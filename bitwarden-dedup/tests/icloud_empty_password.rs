@@ -46,8 +46,8 @@ fn dedup_export_collapses_empty_password_stubs_by_default() {
             empty_pw_login("b", "Acme", "u", Some("https://acme.com/")),
         ]
     });
-    let stats = dedup_export_with_config(&mut export, &DedupConfig::default())
-        .expect("export shape valid");
+    let stats =
+        dedup_export_with_config(&mut export, &DedupConfig::default()).expect("export shape valid");
     assert_eq!(stats.empty_password_groups, 1);
     assert_eq!(stats.empty_password_trashed, 1);
     assert_eq!(stats.living, 1);
@@ -116,9 +116,8 @@ fn icloud_merge_collapses_csv_overlap_by_default() {
     let csv = "Title,URL,Username,Password,Notes,OTPAuth\n\
                Acme,https://acme.com/,u@example.test,,,\n";
 
-    let stats =
-        merge_icloud_csv_into_export_with_config(&mut export, csv, &DedupConfig::default())
-            .expect("merge succeeds");
+    let stats = merge_icloud_csv_into_export_with_config(&mut export, csv, &DedupConfig::default())
+        .expect("merge succeeds");
 
     assert_eq!(stats.csv_rows, 1);
     assert_eq!(stats.csv_items_appended, 1);
@@ -205,8 +204,8 @@ fn dedup_stats_carries_per_pass_breakdown_for_audit_consumers() {
             json!({"id": "n2", "type": 2, "name": "Note", "notes": "body"}),
         ]
     });
-    let stats = dedup_export_with_config(&mut export, &DedupConfig::default())
-        .expect("export valid");
+    let stats =
+        dedup_export_with_config(&mut export, &DedupConfig::default()).expect("export valid");
 
     // Per-pass counts are what the binaries publish as audit fields.
     assert_eq!(stats.strict_login_groups, 1);

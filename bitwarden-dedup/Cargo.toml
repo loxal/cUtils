@@ -39,7 +39,8 @@ tokio = { version = "1", features = [
 ] }
 dotenvy = "0.15.7"
 
-# Phase 1b — crypto stack for `bitwarden-backup-vault-decrypted`.
+# Crypto stack for decoding raw `/api/sync` payloads in tests and in
+# `bitwarden-backup-vault-decrypted`.
 # Audited RustCrypto crates only. No `aes-gcm` (we only handle
 # EncString type 2 = AES-CBC + HMAC-SHA256; type 7 v2 ciphers are
 # refused at parse time per audit invariant L.0 #6). No `rand`

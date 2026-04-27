@@ -49,6 +49,7 @@ fn fixture_path() -> PathBuf {
 /// login (skipped), an already-tagged [duplicate] login (skipped), a
 /// soft-deleted login (skipped), a card (skipped non-login), an identity
 /// (skipped non-login), and a secure note (skipped non-login).
+#[allow(clippy::vec_init_then_push)]
 fn build_curated_fixture() -> Value {
     const FOLDER_ID: &str = "00000000-0000-0000-0001-000000000001";
 

@@ -1,17 +1,18 @@
 // Copyright 2026 Alexander Orlov <alexander.orlov@loxal.net>
 
-//! Live-vault transport for the REST-API binaries.
+//! Live-vault transport for the REST-API snapshot code.
 //!
 //! Used by:
 //!   - `bitwarden-backup-vault-encrypted` — auth + sync only
-//!   - `bitwarden-backup-vault-decrypted` — auth + sync + decrypt
+//!   - `bitwarden-backup-vault-decrypted` — auth + sync + local decrypt
+//!   - crypto/vector tests that keep the direct `/api/sync` decoder honest
 //!
 //! This module owns: OAuth2 `client_credentials` authentication
 //! against `/identity/connect/token`, the `/api/sync` fetch,
 //! `/accounts/prelogin` for KDF parameters, the AES-CBC-HMAC crypto
 //! stack (KDF + HKDF + EncString parser + decrypt), and the
-//! cipher-codec that translates `/api/sync` into the Bitwarden
-//! JSON-export shape that `just dedup` consumes.
+//! cipher-codec that translates `/api/sync` into a Bitwarden
+//! JSON-export-shaped value.
 //!
 //! Vault mutations are NOT implemented — the binaries are
 //! read-only by design. Crypto correctness is gated on
@@ -20,15 +21,15 @@
 //!
 //! # Module map
 //!
-//! - [`auth`]    — OAuth client_credentials, device-id persistence,
-//!                 redacted-error display
+//! - [`auth`] — OAuth client_credentials, device-id persistence,
+//!   redacted-error display
 //! - [`rest`]    — `/api/sync`, `/accounts/prelogin`
-//! - [`crypto`]  — KDF (PBKDF2 + Argon2id), HKDF stretch, EncString
-//!                 type-2 parse + AES-CBC-HMAC decrypt
+//! - [`crypto`] — KDF (PBKDF2 + Argon2id), HKDF stretch, EncString
+//!   type-2 parse + AES-CBC-HMAC decrypt
 //! - [`cipher_codec`] — `/api/sync` → JSON-export shape (with all
-//!                 field-level decryption)
-//! - [`snapshot`]— atomic-no-clobber writers for the encrypted and
-//!                 decrypted backup files
+//!   field-level decryption)
+//! - [`snapshot`] — atomic-no-clobber writers for the encrypted and
+//!   decrypted backup files
 
 pub mod auth;
 pub mod cipher_codec;

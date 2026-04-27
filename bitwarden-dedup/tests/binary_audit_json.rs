@@ -216,7 +216,10 @@ fn bitwarden_dedup_audit_json_has_all_documented_fields() {
     assert_eq!(audit_doc["trashed_count"], 4);
 
     // Back-compat aliases hold the same values as their new keys.
-    assert_eq!(audit_doc["skipped_from_dedup"], audit_doc["strict_pass_skipped"]);
+    assert_eq!(
+        audit_doc["skipped_from_dedup"],
+        audit_doc["strict_pass_skipped"]
+    );
     assert_eq!(audit_doc["removed_count"], audit_doc["trashed_count"]);
 
     // Per-entry shape: every empty-pw drop has both the item_kind
@@ -247,7 +250,11 @@ fn bitwarden_dedup_audit_json_has_all_documented_fields() {
         .iter()
         .filter(|e| e["item_kind"] == "card")
         .collect();
-    assert_eq!(card_entries.len(), 1, "expected one trashed card from the fixture");
+    assert_eq!(
+        card_entries.len(),
+        1,
+        "expected one trashed card from the fixture"
+    );
     assert_eq!(card_entries[0]["removed_id"], "c1");
     assert_eq!(card_entries[0]["kept_id"], "c2");
 
@@ -451,7 +458,10 @@ fn bitwarden_merge_icloud_audit_json_has_all_documented_fields() {
     assert_eq!(audit_doc["csv_rows_appended"], 1);
     assert_eq!(audit_doc["empty_password_groups"], 1);
     assert_eq!(audit_doc["empty_password_trashed"], 1);
-    assert_eq!(audit_doc["skipped_from_dedup"], audit_doc["strict_pass_skipped"]);
+    assert_eq!(
+        audit_doc["skipped_from_dedup"],
+        audit_doc["strict_pass_skipped"]
+    );
 
     // Card and identity passes ran on the merged set and collapsed
     // their respective Bitwarden-side duplicates. Regression guard:
@@ -467,7 +477,11 @@ fn bitwarden_merge_icloud_audit_json_has_all_documented_fields() {
         .iter()
         .filter(|e| e["item_kind"] == "card")
         .collect();
-    assert_eq!(card_entries.len(), 1, "expected one trashed card from the merge fixture");
+    assert_eq!(
+        card_entries.len(),
+        1,
+        "expected one trashed card from the merge fixture"
+    );
     let identity_entries: Vec<&Value> = entries
         .iter()
         .filter(|e| e["item_kind"] == "identity")

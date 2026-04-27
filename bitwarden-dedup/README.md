@@ -20,23 +20,24 @@ FIDO2 credentials, notes, custom fields, and password history.
 > JSON export, process it in memory, and write the results back to
 > disk. Use these whenever you can.
 >
-> **`backup-vault-encrypted` and `backup-vault-decrypted` talk to Bitwarden.**
-> Two REST-API binaries authenticate against `identity.bitwarden.com`
-> / `.eu` with the personal API key and fetch `/api/sync` over
-> rustls + webpki-roots:
+> **Live-vault backups use two different source paths.**
 >
 > - **`just backup-vault-encrypted`** — writes the raw encrypted
 >   `/api/sync` body to `vault/bitwarden_encrypted-export_<UTC-ts>.json`
 >   (0o600, gitignored). No master password requested; cron-friendly.
->   An independent encrypted backup that doesn't depend on Bitwarden's
->   Node.js CLI.
-> - **`just backup-vault-decrypted`** — same network path, plus
->   prompts for the master password and decrypts every cipher field
->   into `vault/bitwarden_decrypted-export_<UTC-ts>.json` (same shape
->   `bw export --format json` emits). Directly drop-in for `just dedup`.
->   The crypto layer is byte-locked against `bitwarden/sdk-internal`
->   via `tests/crypto_vectors.rs`; if the vectors pass, this binary
->   decrypts identically to the official Bitwarden client.
+>   This is a forensic/API snapshot from `https://api.bitwarden.com`
+>   or `.eu` using the personal API key in `vault/bitwarden_api_key.env`.
+> - **`just backup-vault-decrypted`** — uses the same REST/API-key
+>   path, then prompts for the master password locally and decrypts
+>   every cipher field. Raw `/api/sync` contains Trash and Archive;
+>   the dedup-ready output filters both by default to match official
+>   `bw list items` visible-vault semantics. Use the binary flags
+>   `--include-trash` / `--include-archived` only for forensic snapshots.
+> - **`just backup-vault-decrypted-via-bw-cli`** — secondary
+>   cross-check path through the official CLI: `bw sync --force`,
+>   then `bw list folders` / `bw list items`. Prerequisite: the
+>   Bitwarden CLI is logged in and unlocked
+>   (`export BW_SESSION="$(bw unlock --raw)"`).
 >
 > The decrypted output is **plaintext-sensitive** (passwords, TOTP
 > seeds, FIDO2 material in the clear) — same risk profile as
@@ -733,7 +734,7 @@ What the redactor strips (always replaced with a synthetic placeholder):
 - PII: `login.username`, `notes`, `fields[].name`, `fields[].value`,
   `passwordHistory`, `card.*`, `identity.*`
 - vault-origin identifiers: **`id`, `folderId`, `folders[].name`**
-- vault-origin timestamps: **`creationDate`, `revisionDate`, `deletedDate`**
+- vault-origin timestamps: **`creationDate`, `revisionDate`, `deletedDate`, `archivedDate`**
   (synthesized from a rank computed inside each duplicate group so the
   dedup tiebreak still picks the same winner)
 - org metadata: **`organizationId`, `collectionIds`** (always forced to null)

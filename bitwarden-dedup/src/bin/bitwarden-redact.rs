@@ -358,9 +358,8 @@ fn synth_deleted_date(rank: usize) -> String {
 /// - `androidapp://…`   → androidapp placeholder (native Android package)
 /// - `<other>://…`      → https placeholder (unknown scheme, close enough)
 /// - bare identifier    → synthetic bare identifier (e.g. `com.example.iosapp`)
-///                        Preserved as a non-URL opaque string so the fixture
-///                        still exercises the dedup library's explicit "opaque
-///                        URI" case path.
+///   Preserved as a non-URL opaque string so the fixture still
+///   exercises the dedup library's explicit "opaque URI" case path.
 /// - empty / missing    → https placeholder
 fn scrub_uri(orig_uri: Option<&str>, gid: usize, idx: usize) -> String {
     match orig_uri {
@@ -376,6 +375,7 @@ fn scrub_uri(orig_uri: Option<&str>, gid: usize, idx: usize) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::scrub_uri;
     use serde_json::json;
@@ -663,6 +663,14 @@ fn scrub_item(
         "deletedDate".into(),
         if item.get("deletedDate").is_some_and(|v| !v.is_null()) {
             json!(synth_deleted_date(rank))
+        } else {
+            Value::Null
+        },
+    );
+    obj.insert(
+        "archivedDate".into(),
+        if item.get("archivedDate").is_some_and(|v| !v.is_null()) {
+            json!(synth_revision_date(rank))
         } else {
             Value::Null
         },

@@ -90,7 +90,7 @@ pub struct DedupConfig {
     /// separate living items. The default (`false`) runs the pass:
     /// items group when name + organization + username + URI host set
     /// + fido2 signature all match AND the group has at least one
-    /// identifying signal beyond its name.
+    ///   identifying signal beyond its name.
     ///
     /// Default-on because real-vault validation showed every observed
     /// empty-password cluster is genuinely the same account (browser
@@ -156,33 +156,32 @@ impl SignalKind {
 ///
 /// Field meanings:
 /// - `total`    — input item count
-/// - `skipped`  — items the **strict login pass** declined to group:
-///                non-logins, reprompt-gated, empty password,
-///                already tagged `[duplicate]`, already-deleted
-///                items in the input. **Note**: by default some
-///                items counted here are still grouped by the
-///                empty-password pass — `skipped` is
-///                strict-pass-local, not "skipped by every pass".
-///                Audit JSON publishes this as `strict_pass_skipped`.
+/// - `skipped` — items the **strict login pass** declined to group:
+///   non-logins, reprompt-gated, empty password, already tagged
+///   `[duplicate]`, already-deleted items in the input. **Note**: by
+///   default some items counted here are still grouped by the
+///   empty-password pass — `skipped` is strict-pass-local, not
+///   "skipped by every pass". Audit JSON publishes this as
+///   `strict_pass_skipped`.
 /// - `groups`   — total dedup groups across **all** passes (sum of
-///                `strict_login_groups` + `empty_password_groups` +
-///                `secure_note_groups` + `ssh_key_groups`). Read the
-///                per-pass counters for a breakdown.
+///   `strict_login_groups` + `empty_password_groups` +
+///   `secure_note_groups` + `ssh_key_groups`). Read the per-pass
+///   counters for a breakdown.
 /// - `trashed`  — number of items freshly moved to Trash by this run
-///                (dedup losers — they stay in the output array with
-///                `deletedDate = now` so Bitwarden shows them in the Trash
-///                folder after import; no item is ever removed)
+///   (dedup losers — they stay in the output array with
+///   `deletedDate = now` so Bitwarden shows them in the Trash folder
+///   after import; no item is ever removed)
 /// - `merged`   — total URIs merged from dropped items into kept items
 /// - `totp_conflict_groups` — groups that contained more than one distinct
-///                non-empty TOTP (the sensitive case reviewers should
-///                spot-check; every per-entry audit record carries a
-///                `totp_conflict` flag for the same groups)
+///   non-empty TOTP (the sensitive case reviewers should spot-check;
+///   every per-entry audit record carries a `totp_conflict` flag for
+///   the same groups)
 /// - `output`   — total items in the output array (always equals `total`,
-///                because dedup no longer removes anything — it only trashes)
+///   because dedup no longer removes anything — it only trashes)
 /// - `living`   — items in the output whose `deletedDate` is null, i.e.
-///                items the user will see in the main Bitwarden view
+///   items the user will see in the main Bitwarden view
 /// - `audit_entries` — one JSON record per trashed item, suitable for
-///                     writing alongside the deduplicated output
+///   writing alongside the deduplicated output
 #[derive(Debug, Clone)]
 pub struct DedupStats {
     pub total: usize,
@@ -265,11 +264,13 @@ impl DedupStats {
 /// prefer [`dedup_export`] — it resolves folder UUIDs to names in the
 /// disambiguation note. This entry point passes an empty lookup, so
 /// divergent folders fall back to bare UUIDs in the merged notes.
+#[allow(clippy::ptr_arg)]
 pub fn dedup_items(items: &mut Vec<Value>) -> DedupStats {
     dedup_items_with_folders(items, &HashMap::new(), &DedupConfig::default())
 }
 
 /// Same as [`dedup_items`] but with an explicit [`DedupConfig`].
+#[allow(clippy::ptr_arg)]
 pub fn dedup_items_with_config(items: &mut Vec<Value>, config: &DedupConfig) -> DedupStats {
     dedup_items_with_folders(items, &HashMap::new(), config)
 }
@@ -424,7 +425,7 @@ fn extract_folder_names(export: &Value) -> HashMap<String, String> {
 /// it with an explicit folders map; the public API is [`dedup_items`] /
 /// [`dedup_export`] / [`dedup_items_with_config`] / [`dedup_export_with_config`].
 pub(crate) fn dedup_items_with_folders(
-    items: &mut Vec<Value>,
+    items: &mut [Value],
     folders: &HashMap<String, String>,
     config: &DedupConfig,
 ) -> DedupStats {
@@ -678,7 +679,7 @@ struct EmptyPasswordOutcome {
 /// through untouched. The strict pass's losers (which already carry
 /// `deletedDate`) are also filtered out, so we never re-process them.
 fn dedup_empty_password_logins(
-    items: &mut Vec<Value>,
+    items: &mut [Value],
     folders: &HashMap<String, String>,
     now: &str,
     config: &DedupConfig,
@@ -826,7 +827,7 @@ fn dedup_empty_password_logins(
 ///
 /// Returns `(groups_collapsed, losers_trashed, per-entry audit records)`.
 fn dedup_secure_notes(
-    items: &mut Vec<Value>,
+    items: &mut [Value],
     folders: &HashMap<String, String>,
     now: &str,
 ) -> (usize, usize, Vec<Value>) {
@@ -928,17 +929,24 @@ fn secure_note_non_csv_rank(item: &Value) -> u8 {
 /// SSH-key (`type: 5`) dedup — strict equality on the full `sshKey`
 /// object + org. Thin wrapper over [`dedup_strict_metadata_pass`].
 fn dedup_ssh_keys(
-    items: &mut Vec<Value>,
+    items: &mut [Value],
     folders: &HashMap<String, String>,
     now: &str,
 ) -> (usize, usize, Vec<Value>) {
-    dedup_strict_metadata_pass(items, folders, now, "ssh_key", is_dedupable_ssh_key, ssh_key_key)
+    dedup_strict_metadata_pass(
+        items,
+        folders,
+        now,
+        "ssh_key",
+        is_dedupable_ssh_key,
+        ssh_key_key,
+    )
 }
 
 /// Card (`type: 3`) dedup — strict equality on the full `card`
 /// object (number, expiry, CVV, brand, cardholder name) + org.
 fn dedup_cards(
-    items: &mut Vec<Value>,
+    items: &mut [Value],
     folders: &HashMap<String, String>,
     now: &str,
 ) -> (usize, usize, Vec<Value>) {
@@ -949,7 +957,7 @@ fn dedup_cards(
 /// `identity` object (name, address, email, phone, government IDs)
 /// + org.
 fn dedup_identities(
-    items: &mut Vec<Value>,
+    items: &mut [Value],
     folders: &HashMap<String, String>,
     now: &str,
 ) -> (usize, usize, Vec<Value>) {
@@ -1116,7 +1124,7 @@ mod tests {
         }));
         assert_eq!(map.get("a"), Some(&"Alpha".to_string()));
         assert_eq!(map.get("b"), Some(&"".to_string()));
-        assert!(map.get("no-id-dropped").is_none());
+        assert!(!map.contains_key("no-id-dropped"));
     }
 
     #[test]
@@ -1668,10 +1676,7 @@ mod tests {
         assert_eq!(stats.trashed, 1);
         assert_eq!(stats.living, 1);
         // Newer revisionDate wins as survivor.
-        let living_id = items
-            .iter()
-            .find(|i| i["deletedDate"].is_null())
-            .unwrap()["id"]
+        let living_id = items.iter().find(|i| i["deletedDate"].is_null()).unwrap()["id"]
             .as_str()
             .unwrap();
         assert_eq!(living_id, "c2");
@@ -1883,10 +1888,7 @@ mod tests {
         let stats = dedup_items(&mut items);
         assert_eq!(stats.card_groups, 1);
         assert_eq!(stats.trashed, 1);
-        let survivor = items
-            .iter()
-            .find(|i| i["deletedDate"].is_null())
-            .unwrap();
+        let survivor = items.iter().find(|i| i["deletedDate"].is_null()).unwrap();
         let notes = survivor["notes"].as_str().unwrap_or("");
         assert!(
             notes.contains("DE27 5002 4024 5400 0898 01"),
@@ -1920,10 +1922,7 @@ mod tests {
         ];
         let stats = dedup_items(&mut items);
         assert_eq!(stats.identity_groups, 1);
-        let survivor = items
-            .iter()
-            .find(|i| i["deletedDate"].is_null())
-            .unwrap();
+        let survivor = items.iter().find(|i| i["deletedDate"].is_null()).unwrap();
         let notes = survivor["notes"].as_str().unwrap_or("");
         assert!(notes.contains("primary"));
         assert!(notes.contains("DOB: 1990-01-01"));
@@ -1981,10 +1980,7 @@ mod tests {
             }),
         ];
         dedup_items(&mut items);
-        let survivor = items
-            .iter()
-            .find(|i| i["deletedDate"].is_null())
-            .unwrap();
+        let survivor = items.iter().find(|i| i["deletedDate"].is_null()).unwrap();
         assert_eq!(survivor["card"]["number"], "4111");
         assert_eq!(survivor["card"]["expMonth"], "12");
         assert_eq!(survivor["card"]["code"], "123");

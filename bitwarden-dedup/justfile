@@ -16,17 +16,22 @@
 #                                       committable; output still carries
 #                                       vault-shape metadata and is gitignored)
 #
-# REST-API tools (talk to bitwarden.com / .eu over rustls; require the personal
-# API key in vault/bitwarden_api_key.env):
+# Live-vault helpers:
 #   * bitwarden-backup-vault-encrypted — encrypted backup, no master password.
+#                                        Talks directly to /api/sync using the
+#                                        personal API key in
+#                                        vault/bitwarden_api_key.env.
 #                                        Writes the raw /api/sync response to
 #                                        vault/bitwarden_encrypted-export_<ts>.json.
-#   * bitwarden-backup-vault-decrypted — decrypted backup, prompts for master
-#                                        password. Writes a `just dedup`-ready
-#                                        JSON to vault/bitwarden_decrypted-export_<ts>.json.
-#                                        Crypto correctness gated on
-#                                        tests/crypto_vectors.rs (byte-locked
-#                                        against bitwarden/sdk-internal).
+#   * bitwarden-backup-vault-decrypted — decrypted active-vault backup via
+#                                        REST + local decrypt. Uses the
+#                                        personal API key, prompts for the
+#                                        master password locally, filters
+#                                        Trash/Archive like `bw list items`,
+#                                        and writes a `just dedup`-ready JSON.
+#   * bitwarden-backup-vault-decrypted-via-bw-cli
+#                                      — same output shape, sourced through
+#                                        the official `bw` CLI.
 #
 # Default recipe (running `just`) prints the list.
 
@@ -217,7 +222,7 @@ redact input output:
 #
 # Authenticates with the personal API key in
 # `vault/bitwarden_api_key.env`, fetches `/api/sync`, and writes the
-# raw encrypted response to `vault/bitwarden_sync_<UTC-ts>.json`
+# raw encrypted response to `vault/bitwarden_encrypted-export_<UTC-ts>.json`
 # (mode 0o600, gitignored). No master password is requested or used;
 # the snapshot is encrypted end-to-end and not decryptable by this
 # tool. Cron-friendly: no interactive prompt.
@@ -230,30 +235,35 @@ redact input output:
 backup-vault-encrypted:
     cargo run --locked --release --bin bitwarden-backup-vault-encrypted
 
-# Decrypted backup of the live Bitwarden vault via the REST API.
+# Decrypted backup of the live active Bitwarden vault via REST + local decrypt.
 #
-# Same network path as `backup-vault-encrypted`, plus:
-#   - Prompts for the master password (no echo, never logged).
-#   - Derives the master key (Argon2id or PBKDF2 per the account
-#     KDF settings on profile in /api/sync).
-#   - Decrypts the user key + every cipher field.
-#   - Writes a `just dedup`-ready JSON-export-shape file to
-#     `vault/bitwarden_export_<UTC-ts>.json` (mode 0o600, gitignored).
+# This keeps the direct API-key path: OAuth `client_credentials`, `/api/sync`,
+# local master-key derivation, and local cipher decrypt. The raw sync response
+# includes Trash and Archive; this recipe filters both by default to match
+# official `bw list items` visible-vault semantics. Pass binary flags directly
+# with `cargo run` if you need `--include-trash` or `--include-archived`.
+#
+# Writes a `just dedup`-ready JSON-export-shape file to
+# `vault/bitwarden_decrypted-export_<UTC-ts>.json` (mode 0o600, gitignored).
 #
 # **Output is plaintext** — passwords, TOTP seeds, FIDO2 credentials
 # in the clear. Same risk profile as `bw export --format json`. The
 # vault/ directory is the only at-rest protection.
 #
-# Crypto correctness is gated on tests/crypto_vectors.rs (byte-locked
-# vectors lifted from bitwarden/sdk-internal). If those tests pass,
-# this binary decrypts identically to the official Bitwarden client.
-#
 # Prerequisites:
 # - vault/bitwarden_api_key.env populated with BW_CLIENT_ID,
 #   BW_CLIENT_SECRET, BW_REGION (us|eu).
-# - The master password ready to type at the prompt.
 backup-vault-decrypted:
     cargo run --locked --release --bin bitwarden-backup-vault-decrypted
+
+# Decrypted backup through the official Bitwarden CLI.
+#
+# This is useful as an independent cross-check for the direct REST decoder.
+# It shells out to `bw sync --force`, `bw list folders`, and `bw list items`,
+# so it requires a logged-in, unlocked CLI session:
+#   `export BW_SESSION="$(bw unlock --raw)"`
+backup-vault-decrypted-via-bw-cli:
+    cargo run --locked --release --bin bitwarden-backup-vault-decrypted-via-bw-cli
 
 # Regenerate the committed example fixture at examples/example_export.json.
 regenerate-example:

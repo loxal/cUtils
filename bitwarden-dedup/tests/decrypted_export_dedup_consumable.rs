@@ -45,8 +45,8 @@ fn decrypted_output_runs_through_dedup_pipeline_without_error() {
     // Synthetic 64-byte user key (the same one used by the
     // cipher_codec end-to-end test).
     let user_key = symmetric_key_from_split([0xa5u8; 32], [0xa5u8; 32]);
-    let mut uk_bytes = vec![0xa5u8; 64];
-    let user_key_str = encrypt_for_test(&stretched, b"deterministic-iv-1", &mut uk_bytes);
+    let uk_bytes = vec![0xa5u8; 64];
+    let user_key_str = encrypt_for_test(&stretched, b"deterministic-iv-1", &uk_bytes);
 
     // Encrypt a few cipher fields under the user key — one each of
     // login, secureNote, sshKey (the three types `bitwarden-dedup`
@@ -148,8 +148,8 @@ fn decrypted_output_lets_dedup_pipeline_actually_dedup() {
     let stretched = stretch_master_key(&mk);
 
     let user_key = symmetric_key_from_split([0xa5u8; 32], [0xa5u8; 32]);
-    let mut uk_bytes = vec![0xa5u8; 64];
-    let user_key_str = encrypt_for_test(&stretched, b"deterministic-iv-A", &mut uk_bytes);
+    let uk_bytes = vec![0xa5u8; 64];
+    let user_key_str = encrypt_for_test(&stretched, b"deterministic-iv-A", &uk_bytes);
 
     // Two logins identical on (name, username, password) — must
     // collapse to one survivor + one trashed.

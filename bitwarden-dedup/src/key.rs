@@ -10,14 +10,14 @@
 //!
 //! Key members:
 //!
-//! - name           (case-insensitive; trailing `(email@domain)` suffix is
-//!                   stripped, because some Bitwarden clients append it to
-//!                   disambiguate UI-level collisions)
+//! - name (case-insensitive; trailing `(email@domain)` suffix is
+//!   stripped, because some Bitwarden clients append it to
+//!   disambiguate UI-level collisions)
 //! - username       (trim-only — case is preserved)
 //! - password       (exact)
 //! - FIDO2 creds    (canonical serialized full objects, not just credentialIds —
-//!                   different passkeys keep items distinct so no passkey is
-//!                   ever overwritten)
+//!   different passkeys keep items distinct so no passkey is
+//!   ever overwritten)
 //! - organizationId (personal vs org; never cross-dedup)
 //!
 //! **TOTP is deliberately not in the key.** A Bitwarden item has a single
@@ -113,12 +113,12 @@ pub fn dedup_key(item: &Value) -> String {
 /// distinction.
 pub fn normalize_name(s: &str) -> String {
     let trimmed = s.trim();
-    if trimmed.ends_with(')') {
-        if let Some(open) = trimmed.rfind('(') {
-            let inner = &trimmed[open + 1..trimmed.len() - 1];
-            if inner.contains('@') {
-                return trimmed[..open].trim_end().to_lowercase();
-            }
+    if trimmed.ends_with(')')
+        && let Some(open) = trimmed.rfind('(')
+    {
+        let inner = &trimmed[open + 1..trimmed.len() - 1];
+        if inner.contains('@') {
+            return trimmed[..open].trim_end().to_lowercase();
         }
     }
     trimmed.to_lowercase()
@@ -1633,7 +1633,13 @@ mod tests {
     #[test]
     fn card_key_strips_email_suffix_from_name() {
         let mut a = card_item("Visa Personal", "4111", "12", "2030", "123");
-        let mut b = card_item("Visa Personal (alex@example.test)", "4111", "12", "2030", "123");
+        let mut b = card_item(
+            "Visa Personal (alex@example.test)",
+            "4111",
+            "12",
+            "2030",
+            "123",
+        );
         a["organizationId"] = Value::Null;
         b["organizationId"] = Value::Null;
         assert_eq!(card_key(&a), card_key(&b));

@@ -6,11 +6,12 @@
 //! Authenticates with the user's personal API key (OAuth
 //! `client_credentials` against `/identity/connect/token`), fetches
 //! `/api/sync`, and writes the raw response bytes to
-//! `vault/bitwarden_sync_<UTC-ts>.json` with mode 0o600. The
+//! `vault/bitwarden_encrypted-export_<UTC-ts>.json` with mode 0o600. The
 //! response is **encrypted** end-to-end — this tool never sees,
 //! requires, or stores the master password. For a `just dedup`-ready
-//! JSON export, use `bitwarden-backup-vault-decrypted` (which adds
-//! the master-password prompt and the crypto stack).
+//! JSON export, use `bitwarden-backup-vault-decrypted`; for an
+//! independent official-client cross-check, use
+//! `bitwarden-backup-vault-decrypted-via-bw-cli`.
 //!
 //! Use cases:
 //!  - Independent backup of the live vault state, without depending
@@ -36,7 +37,7 @@ use clap::Parser;
     name = "bitwarden-backup-vault-encrypted",
     about = "Encrypted backup of a Bitwarden personal vault via the REST API. \
              Writes the raw /api/sync response (encrypted, no master password \
-             needed) to vault/bitwarden_sync_<UTC-ts>.json with mode 0o600."
+             needed) to vault/bitwarden_encrypted-export_<UTC-ts>.json with mode 0o600."
 )]
 struct Cli {
     /// Path to the env file carrying `BW_CLIENT_ID`,

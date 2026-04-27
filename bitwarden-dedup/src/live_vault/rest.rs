@@ -304,10 +304,10 @@ pub async fn fetch_sync_at_url(
     // Pre-fetch size cap: if the server advertises a Content-Length
     // beyond the documented limit, refuse before allocating the
     // body buffer. Defends against OOM on a runaway response.
-    if let Some(cl) = response.content_length() {
-        if cl > MAX_SYNC_BODY_BYTES {
-            return Err(SyncError::ResponseTooLarge { reported_bytes: cl });
-        }
+    if let Some(cl) = response.content_length()
+        && cl > MAX_SYNC_BODY_BYTES
+    {
+        return Err(SyncError::ResponseTooLarge { reported_bytes: cl });
     }
 
     let status = response.status();

@@ -6,8 +6,8 @@
 //! Authenticates with the personal API key from the Bitwarden web
 //! vault (Account Settings → Security → Keys). This grant type is
 //! the documented service-tool path: it does NOT involve the
-//! master password (the master password is only needed later, for
-//! cipher decryption — see Phase 1b crypto module).
+//! master password. The decrypted backup uses this token only to fetch
+//! `/api/sync`; master-password KDF and cipher decryption stay local.
 //!
 //! Per `RESEARCH_BITWARDEN_CRYPTO.md` § L.8, the SDK includes
 //! non-OAuth-spec fields (`deviceType`, `deviceIdentifier`,
@@ -457,7 +457,7 @@ fn looks_like_uuid_v4(s: &str) -> bool {
     if segs.len() != 5 || segs.iter().map(|s| s.len()).collect::<Vec<_>>() != [8, 4, 4, 4, 12] {
         return false;
     }
-    if segs[2].chars().next() != Some('4') {
+    if !segs[2].starts_with('4') {
         return false;
     }
     let v = segs[3].chars().next();

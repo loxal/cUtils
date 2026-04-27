@@ -901,7 +901,7 @@ mod tests {
         // Bitwarden's 10 000-char cipher limit when unioned. The
         // patch's `notes` body must be capped and `notes_truncated`
         // surfaced.
-        let big = |c: char| -> String { std::iter::repeat(c).take(2500).collect() };
+        let big = |c: char| -> String { std::iter::repeat_n(c, 2500).collect() };
         let keep = json!({
             "type": 1,
             "name": "wx.network",
@@ -960,7 +960,10 @@ mod tests {
         });
         let patch = build_survivor_patch(&keep, &[&drop_a], &HashMap::new());
         assert!(!patch.notes_merged, "no new note content was contributed");
-        assert!(!patch.notes_truncated, "must not truncate user data when no merge happened");
+        assert!(
+            !patch.notes_truncated,
+            "must not truncate user data when no merge happened"
+        );
         // The body is whatever merge_notes returned — should be the
         // full original text.
         let body = patch.notes.expect("notes body");
