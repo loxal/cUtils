@@ -41,8 +41,9 @@ pub use icloud::{
 };
 pub use key::{
     HostKind, card_key, dedup_key, empty_password_dedup_key, host_of, identity_key,
-    is_dedupable_card, is_dedupable_empty_password_login, is_dedupable_identity, normalize_name,
-    skip_from_dedup,
+    is_dedupable_card, is_dedupable_empty_password_login, is_dedupable_identity,
+    is_dedupable_secure_note, is_dedupable_ssh_key, normalize_name, secure_note_key,
+    skip_from_dedup, ssh_key_key,
 };
 pub use pipeline::{
     DedupConfig, DedupStats, SignalKind, dedup_export, dedup_export_with_config, dedup_items,

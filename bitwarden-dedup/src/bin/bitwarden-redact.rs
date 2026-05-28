@@ -18,14 +18,16 @@
 //! custom field counts + types) is preserved so the redacted file is a
 //! realistic test fixture for the dedup tool.
 //!
-//! Duplicate equivalence classes are preserved as well: items that form
-//! a strict duplicate group in the source (same `dedup_key`) share a
-//! synthetic group id and therefore synthesize to the same name,
-//! username, password, and TOTP placeholder. Running `bitwarden-dedup`
-//! against the redacted file yields the same group/removed counts as
-//! the source, because synthetic creation/revision dates are emitted
-//! with rank-based ordering that preserves each group's tiebreak
-//! winner.
+//! Duplicate equivalence classes are preserved as well, across **every**
+//! dedup pass `bitwarden-dedup` runs: strict login (`dedup_key`), secure
+//! note (`secure_note_key`), card (`card_key`), identity
+//! (`identity_key`), SSH key (`ssh_key_key`), and the empty-password
+//! login pass (`empty_password_dedup_key`). Items that group together
+//! in the source share a synthetic group id and therefore synthesize to
+//! the same placeholder fields. Running `bitwarden-dedup` against the
+//! redacted file yields the same group/removed counts as the source,
+//! because synthetic creation/revision dates are emitted with
+//! rank-based ordering that preserves each group's tiebreak winner.
 //!
 //! REDACTION RULES
 //! ---------------
@@ -56,7 +58,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bitwarden_dedup::io_util::write_sensitive_atomic;
-use bitwarden_dedup::{dedup_key, skip_from_dedup};
+use bitwarden_dedup::{
+    card_key, dedup_key, empty_password_dedup_key, identity_key, is_dedupable_card,
+    is_dedupable_empty_password_login, is_dedupable_identity, is_dedupable_secure_note,
+    is_dedupable_ssh_key, secure_note_key, skip_from_dedup, ssh_key_key,
+};
 use clap::Parser;
 use serde_json::{Map, Value, json};
 
@@ -115,16 +121,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("missing 'items' array in export")?;
 
     // Assign stable group ids that preserve the dedup equivalence classes.
-    // Items that are skipped from dedup get their own unique group so they
-    // synthesize to distinct names/usernames/passwords.
+    // The redaction must reproduce the same dedup output across ALL passes
+    // the pipeline runs, not just strict-login. Each pass has its own
+    // (predicate, key) pair; we check them in pipeline order and namespace
+    // the resulting key with the pass tag so a card-pass key never collides
+    // with a strict-login key. Items that no pass groups get a unique key
+    // so they synthesize to distinct names/usernames/passwords.
     let mut groups: HashMap<String, usize> = HashMap::new();
     let mut group_ids: Vec<usize> = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
-        let key = if skip_from_dedup(item) {
-            format!("__unique__{idx}")
-        } else {
-            dedup_key(item)
-        };
+        let key = group_key_for_item(item, idx);
         let next = groups.len();
         let gid = *groups.entry(key).or_insert(next);
         group_ids.push(gid);
@@ -275,6 +281,32 @@ fn build_folder_id_map(data: &Value) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Compute the equivalence-class key an item would land in across the
+/// full dedup pipeline (strict login, secure note, card, identity, SSH
+/// key, empty-password login). Returns a unique-per-`idx` key for items
+/// no pass would group, so they synthesize to distinct placeholders.
+///
+/// Pass keys are namespaced with a tag (e.g. `card\0…`) so a key from
+/// one pass can never collide with a key from another pass even if
+/// their internal serialization happens to match.
+fn group_key_for_item(item: &Value, idx: usize) -> String {
+    if is_dedupable_ssh_key(item) {
+        format!("ssh\0{}", ssh_key_key(item))
+    } else if is_dedupable_card(item) {
+        format!("card\0{}", card_key(item))
+    } else if is_dedupable_identity(item) {
+        format!("identity\0{}", identity_key(item))
+    } else if is_dedupable_secure_note(item) {
+        format!("note\0{}", secure_note_key(item))
+    } else if is_dedupable_empty_password_login(item) {
+        format!("epw\0{}", empty_password_dedup_key(item))
+    } else if !skip_from_dedup(item) {
+        format!("login\0{}", dedup_key(item))
+    } else {
+        format!("__unique__{idx}")
+    }
 }
 
 /// Rank each item within its duplicate group by the original

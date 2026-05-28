@@ -15,10 +15,26 @@
 //!     `vault/bitwarden_decrypted-export_<UTC-ts>.json` (mode 0o600,
 //!     gitignored). Directly consumable by `just dedup`.
 //!
-//! The output intentionally matches official `bw export --format json`
-//! item-state semantics: deleted ciphers from `/api/sync` are omitted,
-//! archived ciphers are preserved with `archivedDate`, and the encrypted
+//! The output matches official `bw export --format json` **item-state**
+//! semantics: deleted ciphers from `/api/sync` are omitted, archived
+//! ciphers are preserved with `archivedDate`, and the encrypted
 //! `/api/sync` snapshot remains the full forensic backup.
+//!
+//! **Scope limits** (where the output is narrower than official
+//! `bw export --format json`):
+//!
+//!   - Organization-owned ciphers (`organizationId != null`) are
+//!     **skipped before decryption**. Their payloads are encrypted
+//!     under per-org keys, not the user key, and decrypting them
+//!     correctly would require unwrapping each
+//!     `profile.organizations[].key` with the user's RSA private key
+//!     and selecting the right org key per cipher — substantial extra
+//!     crypto not yet implemented. The skipped count is surfaced on
+//!     stderr and in the final summary so the user is never
+//!     surprised by missing items.
+//!   - Restricted-item-types policy filtering (an enterprise feature)
+//!     is not applied. Consumer-cloud and personal-vault paths don't
+//!     use it, so this only matters for enterprise-policy users.
 //!
 //! **The decrypted output is maximum-sensitivity plaintext** —
 //! passwords, TOTP seeds, FIDO2 material, secure-note bodies, all
@@ -130,7 +146,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("OK — KDF params: {kdf:?}");
 
     eprintln!("Decrypting vault ...");
-    let mut decrypted = decrypt_sync_to_export_shape(&sync_body, kdf, &master_password)?;
+    let decrypt_result = decrypt_sync_to_export_shape(&sync_body, kdf, &master_password)?;
+    let mut decrypted = decrypt_result.value;
+    let org_omitted = decrypt_result.org_ciphers_omitted;
     let before_count = item_count(&decrypted);
     let filter_stats = filter_export_to_bw_export_items(&mut decrypted, cli.include_trash);
     let after_count = item_count(&decrypted);
@@ -140,6 +158,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(|a| a.len())
         .unwrap_or(0);
     eprintln!("OK — decrypted {before_count} items / {folder_count} folders");
+    if org_omitted > 0 {
+        eprintln!(
+            "Note: skipped {org_omitted} organization-owned cipher(s) — \
+             org-key decryption is not implemented in this tool. \
+             Personal-vault items are decrypted normally; for an org-vault \
+             export use `bw --raw export --format json --organizationid <id>`."
+        );
+    }
     if !cli.include_trash {
         eprintln!(
             "Filtered to {after_count} `bw export` items (omitted {} trashed, preserved {} archived).",
@@ -167,6 +193,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "  state:     omitted {} trashed; preserved {} archived",
             filter_stats.trashed_omitted, filter_stats.archived_kept
+        );
+    }
+    if org_omitted > 0 {
+        println!(
+            "  org-skip:  {org_omitted} cipher(s) skipped — \
+             org-key decryption not implemented (personal-vault items only)"
         );
     }
     if cli.include_trash {

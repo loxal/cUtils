@@ -48,23 +48,34 @@ FIDO2 credentials, notes, custom fields, and password history.
 > - **`just backup-vault-decrypted`** — same REST/API-key path, then
 >   prompts for the master password locally and decrypts every cipher
 >   field. Raw `/api/sync` contains Trash and Archive; the dedup-ready
->   output filters Trash by default to match official
->   `bw export --format json` semantics and preserves Archive via
->   `archivedDate`. Use `--include-trash` only for forensic snapshots;
+>   output filters Trash by default and preserves Archive via
+>   `archivedDate`, matching `bw export --format json` **item-state**
+>   semantics. Use `--include-trash` only for forensic snapshots;
 >   those files are suffixed `-with-trash.json` and skipped by
 >   `just dedup` auto-discovery. **This is the recommended export
 >   path; it does not require the `bw` CLI.**
+>
+>   **Scope limits (vs. official `bw export --format json`):**
+>   - **Org-owned ciphers (`organizationId != null`) are skipped**
+>     before decryption — their payloads are encrypted under per-org
+>     keys, not the user key, and org-key handling is not yet
+>     implemented. The skip is reported on stderr and in the snapshot
+>     summary. Personal-vault items decrypt normally.
+>   - **Restricted-item-types policy filtering is not applied.** This
+>     is an enterprise policy that hides certain cipher types from
+>     exports; the consumer-cloud and personal-vault paths don't use
+>     it, so this only matters for enterprise-policy users.
 > - **`just backup-vault-decrypted-via-bw-cli`** — *optional*
 >   cross-check path through the official CLI's own export command:
->   `bw sync --force`, then `bw --raw export --format json`. Same
->   `bw export` contract as the direct-REST sibling (Trash filtered,
->   Archive preserved), so for the same server state the two backups
->   should agree on id sets and per-cipher field tuples. Useful as a
->   tiebreaker when the two paths ever disagree, or when verifying the
->   direct-REST decoder hasn't drifted from upstream truth. Skip
->   entirely if you don't want a Node.js / `bw` dependency.
->   Prerequisite: the Bitwarden CLI is logged in and unlocked
->   (`export BW_SESSION="$(bw unlock --raw)"`).
+>   `bw sync --force`, then `bw --raw export --format json`. Useful as
+>   a tiebreaker when verifying the direct-REST decoder hasn't drifted
+>   on Trash/Archive item-state semantics, but **the two paths will
+>   not agree byte-for-byte** on vaults that contain org-owned ciphers
+>   or have a restricted-item-types policy in effect — `bw export`
+>   includes org ciphers (it has org-key handling), the direct-REST
+>   tool skips them. Skip entirely if you don't want a Node.js / `bw`
+>   dependency. Prerequisite: the Bitwarden CLI is logged in and
+>   unlocked (`export BW_SESSION="$(bw unlock --raw)"`).
 >
 > The decrypted output is **plaintext-sensitive** (passwords, TOTP
 > seeds, FIDO2 material in the clear) — same risk profile as
@@ -658,7 +669,7 @@ recipes. The most common ones:
 
 ```bash
 just build              # cargo build --release
-just test               # full test suite (lib + both bins + integration + leak-guard)
+just test               # full test suite (lib + all binaries + integration + leak-guard)
 just example            # run bitwarden-dedup against the committed synthetic fixture
 just dedup <path>       # run bitwarden-dedup on a real export
 just redact <in> <out>  # produce a locally-redacted replica of a real export

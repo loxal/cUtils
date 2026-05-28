@@ -27,8 +27,8 @@ use serde_json::{Value, json};
              Matches `bw export` semantics: Trash filtered, Archive preserved."
 )]
 struct Cli {
-    /// Skip `bw sync --force` before listing items. Useful only when
-    /// intentionally working from the current local CLI cache.
+    /// Skip `bw sync --force` before invoking `bw export`. Useful only
+    /// when intentionally working from the current local CLI cache.
     #[arg(long)]
     no_sync: bool,
 }

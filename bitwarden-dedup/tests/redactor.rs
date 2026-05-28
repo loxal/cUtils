@@ -315,6 +315,93 @@ fn redactor_preserves_dedup_equivalence() {
     cleanup(&dir);
 }
 
+/// Equivalence preservation must hold for non-login passes too: cards,
+/// secure notes, identities, SSH keys, and the empty-password login
+/// pass each have their own (predicate, key) pair in the dedup
+/// pipeline, and the redactor must group items the same way the live
+/// pipeline does. This test feeds the redactor a source with a
+/// duplicate **card** pair (no logins involved) and asserts that
+/// dedup-on-redacted reports the same one-group, one-loser result the
+/// live pipeline would produce on the original.
+#[test]
+fn redactor_preserves_card_dedup_equivalence() {
+    let dir = scratch_dir("card-equivalence");
+    let source = json!({
+        "encrypted": false,
+        "folders": [],
+        "items": [
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "organizationId": null,
+                "collectionIds": null,
+                "folderId": null,
+                "type": 3,
+                "reprompt": 0,
+                "favorite": false,
+                "name": "Visa Personal",
+                "notes": null,
+                "creationDate": "2023-01-01T00:00:00Z",
+                "revisionDate": "2024-01-01T00:00:00Z",
+                "deletedDate": null,
+                "fields": null,
+                "passwordHistory": null,
+                "card": {
+                    "cardholderName": "Alice Example",
+                    "brand": "Visa",
+                    "number": "4111111111111111",
+                    "expMonth": "12",
+                    "expYear": "2030",
+                    "code": "123"
+                }
+            },
+            {
+                "id": "22222222-2222-2222-2222-222222222222",
+                "organizationId": null,
+                "collectionIds": null,
+                "folderId": null,
+                "type": 3,
+                "reprompt": 0,
+                "favorite": false,
+                "name": "Visa Personal",
+                "notes": null,
+                "creationDate": "2023-06-01T00:00:00Z",
+                "revisionDate": "2025-06-01T00:00:00Z",
+                "deletedDate": null,
+                "fields": null,
+                "passwordHistory": null,
+                "card": {
+                    "cardholderName": "Alice Example",
+                    "brand": "Visa",
+                    "number": "4111111111111111",
+                    "expMonth": "12",
+                    "expYear": "2030",
+                    "code": "123"
+                }
+            }
+        ]
+    });
+    let input = dir.join("source.json");
+    std::fs::write(&input, serde_json::to_string_pretty(&source).unwrap()).unwrap();
+    let output = dir.join("redacted.json");
+    run_redactor(&input, &output);
+
+    let mut data: Value = serde_json::from_str(&std::fs::read_to_string(&output).unwrap()).unwrap();
+    let items_owned: Vec<Value> = match data.as_object_mut().and_then(|o| o.get_mut("items")) {
+        Some(Value::Array(arr)) => std::mem::take(arr),
+        _ => panic!("redacted output missing items"),
+    };
+    let mut items = items_owned;
+    let stats = bitwarden_dedup::dedup_items(&mut items);
+
+    // Two duplicate cards → one group, one loser.
+    assert_eq!(stats.total, 2);
+    assert_eq!(stats.groups, 1);
+    assert_eq!(stats.trashed, 1);
+    assert_eq!(stats.living, 1);
+
+    cleanup(&dir);
+}
+
 #[test]
 fn redactor_is_byte_for_byte_deterministic() {
     // Same input → same output, twice. Protects against a regression

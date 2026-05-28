@@ -30,15 +30,23 @@
 #                                        Trash like `bw export`, preserves
 #                                        Archive, and writes a
 #                                        `just dedup`-ready JSON.
+#                                        SCOPE: matches `bw export` item-state
+#                                        semantics on personal-vault items.
+#                                        Skips organization-owned ciphers
+#                                        (their payloads need per-org keys);
+#                                        does not apply restricted-item-types
+#                                        enterprise policy filtering.
 #   * bitwarden-backup-vault-decrypted-via-bw-cli
-#                                      — cross-check path with the same
-#                                        Trash-filtered / Archive-preserved
-#                                        contract, but sourced through
-#                                        `bw --raw export --format json`
-#                                        (the official Bitwarden CLI).
-#                                        Independent code path; same output
-#                                        shape; useful for sanity-checking
-#                                        the direct-REST sibling.
+#                                      — cross-check path through the
+#                                        official Bitwarden CLI:
+#                                        `bw --raw export --format json`.
+#                                        Independent code path; useful for
+#                                        sanity-checking Trash/Archive
+#                                        item-state agreement. The two paths
+#                                        WILL diverge on vaults with org
+#                                        ciphers or enterprise-policy
+#                                        filtering — `bw export` handles
+#                                        those, the direct-REST tool does not.
 #
 # Default recipe (running `just`) prints the list.
 
@@ -269,11 +277,14 @@ backup-vault-decrypted:
 
 # Decrypted backup through the official Bitwarden CLI's own export command.
 #
-# This is the cross-check path for the direct REST decoder: it shells out to
-# `bw sync --force` and `bw --raw export --format json`. The output matches
-# `bw export` semantics — Trash filtered, Archive preserved — so for the
-# same server state it should agree with `just backup-vault-decrypted` on
-# id sets and per-cipher field tuples.
+# Cross-check path for the direct REST decoder: shells out to
+# `bw sync --force` and `bw --raw export --format json`. Output matches
+# `bw export` Trash/Archive item-state semantics. For vaults containing
+# only personal-vault items and no enterprise restricted-item-types
+# policy, this should agree with `just backup-vault-decrypted` on id
+# sets and per-cipher field tuples. For org-using or enterprise-policy
+# vaults, the two paths WILL diverge: `bw export` includes org-owned
+# ciphers (it has org-key handling); the direct-REST sibling skips them.
 #
 # Requires a logged-in, unlocked CLI session:
 #   `export BW_SESSION="$(bw unlock --raw)"`
@@ -284,7 +295,7 @@ backup-vault-decrypted-via-bw-cli:
 regenerate-example:
     cargo test --test fixture regenerate_example_fixture -- --ignored --nocapture
 
-# Run the full test suite (lib + both binaries + integration + leak-guard).
+# Run the full test suite (lib + all binaries + integration + leak-guard).
 test:
     cargo test
 

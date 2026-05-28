@@ -303,19 +303,42 @@ pub fn extract_account_email(sync_body: &str) -> Result<String, CodecError> {
     })
 }
 
+/// Result of [`decrypt_sync_to_export_shape`] — the JSON-export-shaped
+/// value plus the count of organization-owned ciphers skipped during
+/// decryption.
+///
+/// Org-owned ciphers (`organizationId != null`) are encrypted under
+/// per-organization keys, not the user key. The current crypto path
+/// only knows how to unwrap and use the user's symmetric key, so org
+/// ciphers are skipped rather than fed to the user-key decrypt path
+/// (which would either fail HMAC validation or silently produce
+/// garbage strings). The skipped count is surfaced so callers can warn
+/// the user. Decrypting org ciphers correctly would require unwrapping
+/// each `profile.organizations[].key` with the user's RSA private key
+/// and selecting the right org key per cipher — substantial extra
+/// crypto not yet implemented.
+#[derive(Debug)]
+pub struct DecryptedExport {
+    /// The `bw export --format json`-shaped JSON value.
+    pub value: Value,
+    /// Number of organization-owned ciphers skipped (not in `value.items`).
+    pub org_ciphers_omitted: usize,
+}
+
 /// Decrypt a `/api/sync` response into the JSON-export shape.
 ///
 /// `kdf` comes from `/accounts/prelogin` — Bitwarden does NOT
 /// include KDF params on `/api/sync.profile` (verified 2026-04-25).
 /// The audit's L.2 recommendation was correct.
 ///
-/// Returns a `serde_json::Value` shaped like `bw export --format json`
-/// — directly importable by `just dedup`.
+/// Returns a [`DecryptedExport`] whose `value` is shaped like
+/// `bw export --format json` and whose `org_ciphers_omitted` reports
+/// how many org-owned ciphers were skipped (see [`DecryptedExport`]).
 pub fn decrypt_sync_to_export_shape(
     sync_body: &str,
     kdf: KdfParams,
     master_password: &SecretString,
-) -> Result<Value, CodecError> {
+) -> Result<DecryptedExport, CodecError> {
     let sync: SyncResponse = serde_json::from_str(sync_body).map_err(CodecError::Shape)?;
 
     let email = sync.profile.email.as_deref().ok_or_else(|| {
@@ -343,17 +366,28 @@ pub fn decrypt_sync_to_export_shape(
         }));
     }
 
-    // Decrypt ciphers.
+    // Decrypt ciphers. Skip organization-owned ciphers up front: their
+    // payloads are encrypted under per-org keys, not the user key, so
+    // running them through `decrypt_cipher` would corrupt or fail. See
+    // `DecryptedExport` for the rationale.
     let mut export_items = Vec::with_capacity(sync.ciphers.len());
+    let mut org_ciphers_omitted = 0usize;
     for cipher in sync.ciphers {
+        if cipher.organization_id.is_some() {
+            org_ciphers_omitted += 1;
+            continue;
+        }
         export_items.push(decrypt_cipher(cipher, &user_key)?);
     }
 
-    Ok(json!({
-        "encrypted": false,
-        "folders": export_folders,
-        "items": export_items,
-    }))
+    Ok(DecryptedExport {
+        value: json!({
+            "encrypted": false,
+            "folders": export_folders,
+            "items": export_items,
+        }),
+        org_ciphers_omitted,
+    })
 }
 
 /// Counts returned by [`filter_export_to_bw_export_items`].
@@ -826,15 +860,94 @@ mod tests {
         // Caller obtains kdf from /accounts/prelogin in production;
         // here we hand it in directly.
         let result = decrypt_sync_to_export_shape(&sync_body, kdf, &pw).unwrap();
-        let items = result["items"].as_array().unwrap();
+        assert_eq!(result.org_ciphers_omitted, 0);
+        let value = result.value;
+        let items = value["items"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], json!("My Login"));
         assert_eq!(items[0]["archivedDate"], json!("2026-04-27T02:00:00Z"));
         // Type 1 → login subobject present.
         assert!(items[0]["login"].is_object());
         // Top-level shape matches a Bitwarden export.
-        assert_eq!(result["encrypted"], json!(false));
-        assert!(result["folders"].is_array());
+        assert_eq!(value["encrypted"], json!(false));
+        assert!(value["folders"].is_array());
+    }
+
+    /// Org-owned ciphers (`organizationId != null`) must be skipped
+    /// before `decrypt_cipher` runs — their payloads are encrypted
+    /// under per-org keys, not the user key, so feeding them to the
+    /// user-key path either fails HMAC validation or silently corrupts
+    /// strings. The skipped count must surface on `org_ciphers_omitted`
+    /// so the binary can warn the user.
+    ///
+    /// The test rigs the org cipher's `name` field with a deliberately
+    /// invalid EncString that the user-key decrypt path would reject —
+    /// if the skip ever regresses, decrypt will error out and the test
+    /// will fail loudly rather than producing garbage.
+    #[test]
+    fn org_owned_ciphers_skipped_before_decrypt() {
+        let pw = SecretString::new("67t9b5g67$%Dh89n".to_string().into());
+        let kdf = KdfParams::Argon2id {
+            iterations: NonZeroU32::new(4).unwrap(),
+            memory_mib: NonZeroU32::new(32).unwrap(),
+            parallelism: NonZeroU32::new(2).unwrap(),
+        };
+        let mk = derive_master_key(&pw, "test_key", kdf).unwrap();
+        let stretched = stretch_master_key(&mk);
+
+        let mut uk_bytes = vec![0xa5u8; 64];
+        let user_key = SymmetricKey::from_bytes_zeroizing(&mut uk_bytes).unwrap();
+
+        let user_key_str = encrypt_for_test(&stretched, b"hardcoded-test-iv", &[0xa5u8; 64]);
+
+        // Personal cipher — name encrypted under the user key, must
+        // round-trip cleanly.
+        let personal_name = encrypt_for_test(&user_key, b"hardcoded-test-iv", b"Personal");
+
+        // Org cipher — `name` is a syntactically valid EncString
+        // header but the ciphertext was NOT encrypted under the user
+        // key. If the skip regresses and decrypt is attempted, the
+        // user-key decrypt path will fail HMAC and the test errors
+        // out. Re-using the personal ciphertext would be a stealth
+        // mode where the test passed despite a real regression — we
+        // want loud failure, so we forge a junk MAC body.
+        let org_name = "2.AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+        let sync_body = format!(
+            r#"{{
+                "profile": {{
+                    "email": "test_key",
+                    "key": "{}"
+                }},
+                "folders": [],
+                "ciphers": [
+                    {{
+                        "id": "personal-1",
+                        "type": 1,
+                        "name": "{}",
+                        "login": {{"username": null, "password": null, "uris": null}}
+                    }},
+                    {{
+                        "id": "org-1",
+                        "organizationId": "11111111-2222-3333-4444-555555555555",
+                        "type": 1,
+                        "name": "{}",
+                        "login": {{"username": null, "password": null, "uris": null}}
+                    }}
+                ]
+            }}"#,
+            user_key_str, personal_name, org_name
+        );
+
+        let result = decrypt_sync_to_export_shape(&sync_body, kdf, &pw).unwrap();
+        assert_eq!(
+            result.org_ciphers_omitted, 1,
+            "the single org-owned cipher must be counted as omitted"
+        );
+        let items = result.value["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "only the personal cipher survives");
+        assert_eq!(items[0]["id"], json!("personal-1"));
+        assert_eq!(items[0]["name"], json!("Personal"));
     }
 
     #[test]

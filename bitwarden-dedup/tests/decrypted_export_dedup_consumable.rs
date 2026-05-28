@@ -109,7 +109,8 @@ fn decrypted_output_runs_through_dedup_pipeline_without_error() {
 
     // Decrypt — exercises the full cipher_codec pipeline.
     let mut decrypted = decrypt_sync_to_export_shape(&sync_body, kdf, &pw)
-        .expect("decrypt_sync_to_export_shape must succeed on a well-formed synthetic vault");
+        .expect("decrypt_sync_to_export_shape must succeed on a well-formed synthetic vault")
+        .value;
 
     // Sanity-check the produced shape before handing to dedup.
     let items = decrypted["items"].as_array().expect("items must be array");
@@ -196,7 +197,9 @@ fn decrypted_output_lets_dedup_pipeline_actually_dedup() {
         }}"#,
     );
 
-    let mut decrypted = decrypt_sync_to_export_shape(&sync_body, kdf, &pw).unwrap();
+    let mut decrypted = decrypt_sync_to_export_shape(&sync_body, kdf, &pw)
+        .unwrap()
+        .value;
     let stats = dedup_export_with_config(&mut decrypted, &DedupConfig::default()).unwrap();
 
     assert_eq!(stats.total, 2, "two items in input");
@@ -270,7 +273,9 @@ fn decrypted_archived_duplicate_survives_dedup_unchanged() {
         }}"#,
     );
 
-    let mut decrypted = decrypt_sync_to_export_shape(&sync_body, kdf, &pw).unwrap();
+    let mut decrypted = decrypt_sync_to_export_shape(&sync_body, kdf, &pw)
+        .unwrap()
+        .value;
     let stats = dedup_export_with_config(&mut decrypted, &DedupConfig::default()).unwrap();
 
     assert_eq!(stats.total, 2);
