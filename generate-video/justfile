@@ -1,4 +1,4 @@
-generate-video input='text' prompt-file='~/my/src/loxal/lox/al/prompts/video.md' resolution='720p' model='veo-3.1-generate-001' audio='false' gcs-bucket='gs://instant-droplet-485818-i0-video-staging':
+generate-video input='text' prompt-file='~/my/src/loxal/lox/agent/prompts/video.md' resolution='720p' model='veo-3.1-generate-001' audio='false' gcs-bucket='gs://instant-droplet-485818-i0-video-staging':
     cargo run --release -- --input {{input}} --prompt-file {{prompt-file}} --resolution {{resolution}} --model {{model}} {{ if audio == "false" { "--no-audio" } else { "" } }} --gcs-bucket {{gcs-bucket}}
 
 google-auth project='instant-droplet-485818-i0':

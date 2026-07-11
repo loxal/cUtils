@@ -117,7 +117,7 @@ async fn main() {
     fs::create_dir_all(speech_dir).expect("Failed to create speech directory");
 
     let home = std::env::var("HOME").expect("HOME not set");
-    let prompts_dir = PathBuf::from(home).join("my/src/loxal/lox/al/prompts");
+    let prompts_dir = PathBuf::from(home).join("my/src/loxal/lox/agent/prompts");
     let md_file = prompts_dir.join("speech.md");
 
     let resolved_ssml = find_ssml_file(&prompts_dir);
