@@ -1,4 +1,4 @@
-generate-image prompt-file='~/my/src/loxal/lox/agent/prompts/avatar.md' number-of-images='4' aspect-ratio='1:1' model='imagen-4.0-ultra-generate-001' no-watermark='false':
+generate-image prompt-file='~/my/src/loxal/lifub/agent/prompts/avatar.md' number-of-images='4' aspect-ratio='1:1' model='imagen-4.0-ultra-generate-001' no-watermark='false':
     cargo run --release -- --prompt-file {{prompt-file}} --number-of-images {{number-of-images}} --aspect-ratio {{aspect-ratio}} --model {{model}} {{ if no-watermark == "true" { "--no-watermark" } else { "" } }}
 
 google-auth project='instant-droplet-485818-i0':

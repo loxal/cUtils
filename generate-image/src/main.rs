@@ -13,7 +13,7 @@ const LOCATION: &str = "us-central1";
 
 #[derive(Parser)]
 struct Args {
-    #[arg(long, default_value = "~/my/src/loxal/lox/agent/prompts/avatar.md")]
+    #[arg(long, default_value = "~/my/src/loxal/lifub/agent/prompts/avatar.md")]
     prompt_file: String,
 
     #[arg(long, default_value_t = 4)]
