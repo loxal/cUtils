@@ -1,6 +1,8 @@
+# SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 [package]
 name = "generate-video"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 publish = false
 

@@ -1,6 +1,8 @@
+# SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 [package]
 name = "hurl-to-har-to-hurl-converter"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Convert between HURL and HAR file formats"
 license = "MIT"
