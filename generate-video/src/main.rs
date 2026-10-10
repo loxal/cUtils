@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 mod veo;
 
 use std::fs;
@@ -164,17 +166,17 @@ async fn main() {
         prompt.clone()
     };
 
-    let videos = veo::generate_video(
-        PROJECT_ID,
-        LOCATION,
-        &args.model,
-        &final_prompt,
-        &input_mode,
-        !args.no_audio,
-        negative_prompt.as_deref(),
-        &args.resolution,
-        args.gcs_bucket.as_deref(),
-    )
+    let videos = veo::generate_video(&veo::VideoRequest {
+        project_id: PROJECT_ID,
+        location: LOCATION,
+        model: &args.model,
+        prompt: &final_prompt,
+        input_mode: &input_mode,
+        generate_audio: !args.no_audio,
+        negative_prompt: negative_prompt.as_deref(),
+        resolution: &args.resolution,
+        gcs_bucket: args.gcs_bucket.as_deref(),
+    })
     .await
     .unwrap_or_else(|e| {
         eprintln!("Video generation failed: {e}");

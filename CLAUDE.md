@@ -1,3 +1,5 @@
+<!-- SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com> -->
+
 # CLAUDE.md — cUtils
 
 ## Overview
@@ -26,8 +28,13 @@ cargo build
 cargo test
 ```
 
+Every crate must also pass `cargo fmt --check` and
+`cargo clippy --locked --all-targets -- -D warnings` (bitwarden-dedup: add
+`--all-features`, as its `just check` recipe does).
+
 ## Conventions
 
 - Rust edition 2024, stable channel
+- Minimum Rust 1.88: several crates use let chains and `slice::as_chunks`
 - Each tool is a standalone binary crate with its own `Cargo.toml`
 - Google Cloud credentials via Application Default Credentials (`gcloud auth application-default login`)

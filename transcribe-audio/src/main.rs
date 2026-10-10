@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 mod diarization;
 mod ssml;
 mod transcribe;
@@ -127,11 +129,11 @@ async fn main() {
     }
 
     let model_path = expand_home(&args.model_path);
-    if !model_path.exists() {
-        if let Err(e) = download_model(&model_path).await {
-            eprintln!("Failed to download model: {e}");
-            process::exit(1);
-        }
+    if !model_path.exists()
+        && let Err(e) = download_model(&model_path).await
+    {
+        eprintln!("Failed to download model: {e}");
+        process::exit(1);
     }
 
     println!("\nLoading Whisper large-v3 model...");
@@ -164,7 +166,10 @@ async fn main() {
 
     println!("\nFound {} audio file(s) to process:", audio_files.len());
     for f in audio_files.iter().take(10) {
-        println!("  - {}", f.file_name().unwrap_or_default().to_string_lossy());
+        println!(
+            "  - {}",
+            f.file_name().unwrap_or_default().to_string_lossy()
+        );
     }
     if audio_files.len() > 10 {
         println!("  ... and {} more", audio_files.len() - 10);

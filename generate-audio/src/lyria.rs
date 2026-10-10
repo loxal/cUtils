@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 use base64::Engine;
 use gcp_auth::TokenProvider;
 use reqwest::Client;
@@ -59,7 +61,12 @@ pub async fn generate_audio(
 
     let token = get_token().await?;
     let client = Client::new();
-    let response = client.post(&url).bearer_auth(&token).json(&request).send().await?;
+    let response = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await?;
 
     if !response.status().is_success() {
         let status = response.status();

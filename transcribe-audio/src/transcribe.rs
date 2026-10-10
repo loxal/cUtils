@@ -1,16 +1,18 @@
+// SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 use std::path::Path;
 use std::process::Command;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// Whisper language IDs in order (matches whisper.cpp/whisper_lang_str).
 const WHISPER_LANGS: &[&str] = &[
-    "en", "zh", "de", "fr", "es", "ru", "ko", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv",
-    "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no",
-    "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr",
-    "az", "sl", "kn", "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw",
-    "gl", "mr", "pa", "si", "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu",
-    "am", "yi", "lo", "uz", "fo", "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl",
-    "mg", "as", "tt", "haw", "ln", "ha", "ba", "jw", "su", "yue",
+    "en", "zh", "de", "fr", "es", "ru", "ko", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv", "it",
+    "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no", "th", "ur",
+    "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
+    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw", "gl", "mr", "pa", "si",
+    "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo",
+    "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln",
+    "ha", "ba", "jw", "su", "yue",
 ];
 
 pub struct Segment {
@@ -62,18 +64,17 @@ fn load_audio_pcm(audio_path: &str) -> Result<Vec<f32>, Box<dyn std::error::Erro
         .output()?;
 
     if !output.status.success() {
-        return Err(
-            format!("ffmpeg failed: {}", String::from_utf8_lossy(&output.stderr)).into(),
-        );
+        return Err(format!("ffmpeg failed: {}", String::from_utf8_lossy(&output.stderr)).into());
     }
 
-    let samples: Vec<f32> = output
-        .stdout
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect();
+    Ok(decode_f32le(&output.stdout))
+}
 
-    Ok(samples)
+/// Decode raw little-endian `f32` PCM. A trailing partial sample (fewer than
+/// 4 bytes) is dropped.
+fn decode_f32le(bytes: &[u8]) -> Vec<f32> {
+    let (frames, _partial) = bytes.as_chunks::<4>();
+    frames.iter().map(|&b| f32::from_le_bytes(b)).collect()
 }
 
 pub fn transcribe(
@@ -128,4 +129,23 @@ pub fn transcribe(
         language: detected_lang,
         segments,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_f32le;
+
+    #[test]
+    fn decodes_little_endian_samples_and_drops_partial_tail() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes.extend_from_slice(&(-0.5f32).to_le_bytes());
+        bytes.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        assert_eq!(decode_f32le(&bytes), vec![1.0, -0.5]);
+    }
+
+    #[test]
+    fn decodes_empty_input_to_no_samples() {
+        assert!(decode_f32le(&[]).is_empty());
+    }
 }

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 use base64::Engine;
 use gcp_auth::TokenProvider;
 use reqwest::Client;
@@ -70,17 +72,35 @@ async fn get_token() -> Result<String, Box<dyn std::error::Error>> {
     Ok(token.as_str().to_string())
 }
 
+/// Everything one Veo `predictLongRunning` call needs, grouped so the call
+/// site names each value instead of passing nine positional arguments.
+pub struct VideoRequest<'a> {
+    pub project_id: &'a str,
+    pub location: &'a str,
+    pub model: &'a str,
+    pub prompt: &'a str,
+    pub input_mode: &'a InputMode,
+    pub generate_audio: bool,
+    pub negative_prompt: Option<&'a str>,
+    pub resolution: &'a str,
+    pub gcs_bucket: Option<&'a str>,
+}
+
 pub async fn generate_video(
-    project_id: &str,
-    location: &str,
-    model: &str,
-    prompt: &str,
-    input_mode: &InputMode,
-    generate_audio: bool,
-    negative_prompt: Option<&str>,
-    resolution: &str,
-    gcs_bucket: Option<&str>,
+    request: &VideoRequest<'_>,
 ) -> Result<Vec<GeneratedVideo>, Box<dyn std::error::Error>> {
+    let VideoRequest {
+        project_id,
+        location,
+        model,
+        prompt,
+        input_mode,
+        generate_audio,
+        negative_prompt,
+        resolution,
+        gcs_bucket,
+    } = *request;
+
     let url = format!(
         "https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project_id}/locations/{location}/publishers/google/models/{model}:predictLongRunning"
     );
@@ -127,7 +147,12 @@ pub async fn generate_video(
 
     let token = get_token().await?;
     let client = Client::new();
-    let response = client.post(&url).bearer_auth(&token).json(&request).send().await?;
+    let response = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -189,9 +214,11 @@ async fn poll_operation(
         }
 
         if let Some(err) = operation.error {
-            return Err(
-                format!("Video generation failed (code {}): {}", err.code, err.message).into(),
-            );
+            return Err(format!(
+                "Video generation failed (code {}): {}",
+                err.code, err.message
+            )
+            .into());
         }
 
         return parse_response(operation.response);

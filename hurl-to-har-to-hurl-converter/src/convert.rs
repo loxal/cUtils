@@ -1,4 +1,4 @@
-// Copyright 2026 Alexander Orlov <alexander.orlov@loxal.net>
+// SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
 
 use std::path::Path;
 
@@ -219,7 +219,7 @@ pub fn hurl_to_har(hurl_path: &Path, out_dir: &Path) -> Result<std::path::PathBu
             url.clone()
         } else {
             let sep = if url.contains('?') { '&' } else { '?' };
-            use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+            use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
             // Encode only characters that break query-string parsing while
             // preserving HURL template placeholders like {{variable}}.
             const QS_VALUE: &AsciiSet = &CONTROLS
@@ -375,9 +375,8 @@ pub fn hurl_to_har(hurl_path: &Path, out_dir: &Path) -> Result<std::path::PathBu
         log: har::Spec::V1_2(log),
     };
 
-    let json = har::to_json(&har).map_err(|e| -> AnyError {
-        format!("Failed to serialize HAR: {e}").into()
-    })?;
+    let json = har::to_json(&har)
+        .map_err(|e| -> AnyError { format!("Failed to serialize HAR: {e}").into() })?;
 
     let out_name = hurl_path
         .file_stem()

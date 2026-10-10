@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 mod markdown;
 mod metadata;
 mod ssml;
@@ -62,12 +64,11 @@ fn lang_config(lang: &str) -> Option<LangConfig> {
 
 fn find_ssml_file(prompts_dir: &Path) -> Option<PathBuf> {
     let ssml_file = prompts_dir.join("speech.ssml");
-    if ssml_file.exists() {
-        if let Ok(content) = fs::read_to_string(&ssml_file) {
-            if !content.trim().is_empty() {
-                return Some(ssml_file);
-            }
-        }
+    if ssml_file.exists()
+        && let Ok(content) = fs::read_to_string(&ssml_file)
+        && !content.trim().is_empty()
+    {
+        return Some(ssml_file);
     }
     let mut candidates: Vec<PathBuf> = fs::read_dir(prompts_dir)
         .ok()?
@@ -82,10 +83,10 @@ fn find_ssml_file(prompts_dir: &Path) -> Option<PathBuf> {
     candidates.sort();
     candidates.reverse();
     for c in candidates {
-        if let Ok(content) = fs::read_to_string(&c) {
-            if !content.trim().is_empty() {
-                return Some(c);
-            }
+        if let Ok(content) = fs::read_to_string(&c)
+            && !content.trim().is_empty()
+        {
+            return Some(c);
         }
     }
     None
@@ -221,7 +222,12 @@ async fn main() {
 
     let local_wav = speech_dir.join(&gcs_filename);
     let status = Command::new("gcloud")
-        .args(["storage", "cp", &output_gcs_uri, &local_wav.to_string_lossy()])
+        .args([
+            "storage",
+            "cp",
+            &output_gcs_uri,
+            &local_wav.to_string_lossy(),
+        ])
         .status()
         .expect("Failed to run gcloud");
     if !status.success() {
@@ -250,4 +256,67 @@ async fn main() {
 
     fs::remove_file(&local_wav).ok();
     println!("Saved {}", local_out.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_ssml_file;
+    use std::fs;
+    use std::ops::Deref;
+    use std::path::{Path, PathBuf};
+
+    /// Per-test scratch directory, removed on drop so a failed assertion
+    /// does not leave it behind.
+    struct TmpDir(PathBuf);
+
+    impl Deref for TmpDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tmp_dir(name: &str) -> TmpDir {
+        let dir =
+            std::env::temp_dir().join(format!("generate-speech-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        TmpDir(dir)
+    }
+
+    #[test]
+    fn prefers_non_empty_speech_ssml() {
+        let dir = tmp_dir("prefers");
+        fs::write(dir.join("speech.ssml"), "<speak>a</speak>").unwrap();
+        fs::write(dir.join("speech-2026-01-01.ssml"), "<speak>b</speak>").unwrap();
+        assert_eq!(find_ssml_file(&dir), Some(dir.join("speech.ssml")));
+    }
+
+    #[test]
+    fn falls_back_to_newest_non_empty_timestamped_file() {
+        let dir = tmp_dir("fallback");
+        fs::write(dir.join("speech.ssml"), "  \n").unwrap();
+        fs::write(dir.join("speech-2026-01-01.ssml"), "<speak>old</speak>").unwrap();
+        fs::write(dir.join("speech-2026-02-01.ssml"), "<speak>new</speak>").unwrap();
+        fs::write(dir.join("speech-2026-03-01.ssml"), "").unwrap();
+        assert_eq!(
+            find_ssml_file(&dir),
+            Some(dir.join("speech-2026-02-01.ssml"))
+        );
+    }
+
+    #[test]
+    fn returns_none_without_usable_ssml() {
+        let dir = tmp_dir("none");
+        fs::write(dir.join("speech-2026-01-01.ssml"), " ").unwrap();
+        fs::write(dir.join("speech.md"), "text").unwrap();
+        assert_eq!(find_ssml_file(&dir), None);
+    }
 }

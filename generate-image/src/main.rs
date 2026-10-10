@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 mod imagen;
 
 use std::fs;
@@ -69,16 +71,16 @@ async fn main() {
         .collect();
 
     println!("Generating image(s)...");
-    let images = imagen::generate_images(
-        PROJECT_ID,
-        LOCATION,
-        &args.model,
-        &prompt,
-        args.number_of_images,
-        &args.aspect_ratio,
-        &args.negative_prompt,
-        !args.no_watermark,
-    )
+    let images = imagen::generate_images(&imagen::ImageRequest {
+        project_id: PROJECT_ID,
+        location: LOCATION,
+        model: &args.model,
+        prompt: &prompt,
+        sample_count: args.number_of_images,
+        aspect_ratio: &args.aspect_ratio,
+        negative_prompt: &args.negative_prompt,
+        add_watermark: !args.no_watermark,
+    })
     .await
     .unwrap_or_else(|e| {
         eprintln!("Image generation failed: {e}");

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright 2026 Alexander Orlov <info@lifub.com>
+
 use base64::Engine;
 use gcp_auth::TokenProvider;
 use reqwest::Client;
@@ -58,16 +60,33 @@ pub struct GeneratedImage {
     pub gcs_uri: Option<String>,
 }
 
+/// Everything one Imagen `predict` call needs, grouped so the call site names
+/// each value instead of passing eight positional arguments.
+pub struct ImageRequest<'a> {
+    pub project_id: &'a str,
+    pub location: &'a str,
+    pub model: &'a str,
+    pub prompt: &'a str,
+    pub sample_count: u32,
+    pub aspect_ratio: &'a str,
+    pub negative_prompt: &'a str,
+    pub add_watermark: bool,
+}
+
 pub async fn generate_images(
-    project_id: &str,
-    location: &str,
-    model: &str,
-    prompt: &str,
-    sample_count: u32,
-    aspect_ratio: &str,
-    negative_prompt: &str,
-    add_watermark: bool,
+    request: &ImageRequest<'_>,
 ) -> Result<Vec<GeneratedImage>, Box<dyn std::error::Error>> {
+    let ImageRequest {
+        project_id,
+        location,
+        model,
+        prompt,
+        sample_count,
+        aspect_ratio,
+        negative_prompt,
+        add_watermark,
+    } = *request;
+
     let url = format!(
         "https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers/google/models/{model}:predict"
     );
@@ -90,7 +109,12 @@ pub async fn generate_images(
 
     let token = get_token().await?;
     let client = Client::new();
-    let response = client.post(&url).bearer_auth(&token).json(&request).send().await?;
+    let response = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await?;
 
     if !response.status().is_success() {
         let status = response.status();
